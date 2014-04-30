@@ -75,7 +75,17 @@ type ssdp struct {
 
 
 // The common SSDP fields in the Notify ssdp:alive message.
-// Raw headers are in RawHeaders, and names are all uppercase.
+// Raw headers are in RawHeaders, and names are all uppercase.\
+//
+// Notify (alive)
+//      NOTIFY * HTTP/1.1
+//      Host: 239.255.255.250:1900
+//      NT: blenderassociation:blender               // notification type. Aka search target.
+//      NTS: ssdp:alive                              // message sub-type. Either ssdp:alive or ssdp:byebye
+//      USN: someunique:idscheme3                    // Unique Service Name. An instance of a device
+//      LOCATION: <blender:ixl><http://foo/bar>      // location of the service being advertised. Eg. http://hello.com
+//      Cache-Control: max-age = 7393                // how long this is valid for. as defined by http standards
+//      SERVER: WIN/8.1 UPnP/1.0 gossdp/0.1                  // Concat of OS, UPnP, and product.
 type AliveMessage struct {
     SearchType      string
     DeviceId        string
@@ -86,6 +96,12 @@ type AliveMessage struct {
     RawRequest      *http.Request
 }
 
+// Notify (bye): server-only:
+//      NOTIFY * HTTP/1.1
+//      Host: 239.255.255.250:1900
+//      NT: search:target
+//      NTS: ssdp:byebye
+//      USN: uuid:the:unique
 type ByeMessage struct {
     SearchType      string
     Usn             string
@@ -93,6 +109,15 @@ type ByeMessage struct {
     RawRequest      *http.Request
 }
 
+// search-response: server-only:
+//      HTTP/1.1 200 OK
+//      Ext:                                                 // required by http extension framework. just key, no value
+//      Cache-Control: max-age = 5000                        // number of seconds this message is valid for
+//      ST: ge:fridge                                        // Search target. respond with all matching targets. Same as NT in Notify messages
+//      USN: uuid:abcdefgh-7dec-11d0-a765-00a0c91e6bf6       // Unique Service name
+//      LOCATION: <blender:ixl><http://foo/bar>              // location of the service being advertised. Eg. http://hello.com
+//      SERVER: WIN/8.1 UPnP/1.0 gossdp/0.1                  // Concat of OS, UPnP, and product.
+//      DATE: date of response                               // rfc1123-date of the response
 type ResponseMessage struct {
     MaxAge              int
     SearchType          string
@@ -100,35 +125,16 @@ type ResponseMessage struct {
     DeviceId            string
     Location            string
     Server              string
-    Date                time.Time
+    RawResponse         *http.Response
 }
 
 type SsdpListener interface {
     NotifyAlive(message AliveMessage)
     NotifyBye(message ByeMessage)
-    Response(msg string, hostPort string)
+    Response(message ResponseMessage)
 }
 
 // reference doc: http://www.upnp.org/specs/arch/UPnP-arch-DeviceArchitecture-v1.0-20081015.pdf
-
-
-// Notify (alive): server-only:
-// NOTIFY * HTTP/1.1
-// Host: 239.255.255.250:1900
-// NT: blenderassociation:blender               // notification type. Aka search target.
-// NTS: ssdp:alive                              // message sub-type. Either ssdp:alive or ssdp:byebye
-// USN: someunique:idscheme3                    // Unique Service Name. An instance of a device
-// LOCATION: <blender:ixl><http://foo/bar>      // location of the service being advertised. Eg. http://hello.com
-// Cache-Control: max-age = 7393                // how long this is valid for. as defined by http standards
-// SERVER: WIN/8.1 UPnP/1.0 gossdp/0.1                  // Concat of OS, UPnP, and product.
-
-// Notify (bye): server-only:
-// NOTIFY * HTTP/1.1
-// Host: 239.255.255.250:1900
-// NT: search:target
-// NTS: ssdp:byebye
-// USN: uuid:the:unique
-
 
 
 // search: client-only:
@@ -142,15 +148,7 @@ type SsdpListener interface {
 // MX: 3                                                // maximum wait time in seconds.
                                                         //  Response time should be random between 0 and this number
 
-// search-response: server-only:
-// HTTP/1.1 200 OK
-// Ext:                                                 // required by http extension framework. just key, no value
-// Cache-Control: max-age = 5000                        // number of seconds this message is valid for
-// ST: ge:fridge                                        // Search target. respond with all matching targets. Same as NT in Notify messages
-// USN: uuid:abcdefgh-7dec-11d0-a765-00a0c91e6bf6       // Unique Service name
-// LOCATION: <blender:ixl><http://foo/bar>              // location of the service being advertised. Eg. http://hello.com
-// SERVER: WIN/8.1 UPnP/1.0 gossdp/0.1                  // Concat of OS, UPnP, and product.
-// DATE: date of response                               // rfc1123-date of the response
+
 
 
 type AdvertisableServer struct {
@@ -205,7 +203,8 @@ func (s *ssdp) parseMessage(message, hostPort string) {
     req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(message)))
     if err != nil {
         log.Println("Error parsing request: ", err)
-        //s.parseResponse(message, hostPort)
+        s.parseResponse(message, hostPort)
+        return
     }
 
     if req.URL.Path != "*" {
@@ -314,7 +313,45 @@ func (s *ssdp) parseResponse(msg, hostPort string) {
     if s.listener == nil {
         return
     }
-    s.listener.Response(msg, hostPort)
+    resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(msg)), nil)
+    if err != nil {
+        log.Println("Not a valid response! ", err)
+        return
+    }
+    defer resp.Body.Close()
+
+    maxAge := -1
+    if cc := resp.Header.Get("CACHE-CONTROL"); cc != "" {
+        subMatch := cacheControlAge.FindStringSubmatch(cc)
+        if len(subMatch) == 2 {
+            maxAgeInt64, err := strconv.ParseInt(subMatch[1], 10, 0)
+            if err != nil {
+                maxAge = int(maxAgeInt64)
+            }
+        }
+    }
+    var deviceId string
+    usn := resp.Header.Get("USN")
+    if len(usn) > 0 {
+        parts := strings.Split(usn, ":")
+        if len(parts) > 2 {
+            if parts[0] == "uuid" {
+                deviceId = parts[1]
+            }
+        }
+    }
+
+    respMessage :=ResponseMessage{
+        MaxAge              : maxAge,
+        SearchType          : resp.Header.Get("ST"),
+        Usn                 : usn,
+        DeviceId            : deviceId,
+        Location            : resp.Header.Get("LOCATION"),
+        Server              : resp.Header.Get("SERVER"),
+        RawResponse         : resp,
+    }
+
+    s.listener.Response(respMessage)
 }
 
 
@@ -393,7 +430,7 @@ func (s *ssdp) ListenFor(searchTarget string) error {
     if err != nil {
         return err
     }
-    _, err = s.socket.WriteTo(msg, nil, addr)
+    _, err = s.rawSocket.WriteTo(msg, addr)
     return err
 }
 
@@ -509,6 +546,7 @@ func (s * ssdp) Start() {
             return
         }
         if n > 0 {
+            log.Println("Message: ", string(readBytes[0:n]))
             s.parseMessage(string(readBytes[0:n]), src.String())
         }
     }

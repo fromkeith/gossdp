@@ -17,7 +17,7 @@ func (b blah) NotifyAlive(message gossdp.AliveMessage) {
 func (b blah) NotifyBye(message gossdp.ByeMessage) {
     log.Println("NotifyBye")
 }
-func (b blah) Response(msg string, hostPort string) {
+func (b blah) Response(message gossdp.ResponseMessage) {
     log.Println("Response")
 }
 
@@ -50,7 +50,7 @@ func testClient() {
     defer c.Stop()
     go c.Start()
 
-    c.ListenFor("urn:fromkeith:test:web:0")
+    err = c.ListenFor("urn:fromkeith:test:web:0")
     time.Sleep(30 * time.Second)
 }
 
