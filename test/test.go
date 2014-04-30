@@ -31,7 +31,7 @@ func testServer() {
     go s.Start()
 
     serverDef := gossdp.AdvertisableServer{
-        ServiceType: "fromkeith:test:web:0",
+        ServiceType: "urn:fromkeith:test:web:0",
         DeviceUuid: "hh0c2981-0029-44b7-4u04-27f187aecf78",
         Location: "http://192.168.1.1:8080",
         MaxAge: 3600,
@@ -50,13 +50,13 @@ func testClient() {
     defer c.Stop()
     go c.Start()
 
-    c.ListenFor("fromkeith:test:web:0")
+    c.ListenFor("urn:fromkeith:test:web:0")
     time.Sleep(30 * time.Second)
 }
 
 func main() {
-
-    go testServer()
-    time.Sleep(5 * time.Second)
-    testClient()
+    testServer()
+    //go testServer()
+    //time.Sleep(5 * time.Second)
+    //testClient()
 }

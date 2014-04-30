@@ -65,26 +65,12 @@ var (
 )
 
 type ssdp struct {
-    responses       map[string]bool
-    usns            map[string]string
-    httphost        string
-    description     string
-    ttl             string
-    ssdpSig         string
-    udp             string
-    ipport          string
-    ssdpPort        string
-    ssdpIp          string
-    ssdpTtl         string
-
-    listenSearchTargets         map[string]bool
-
-    // updated
     advertisableServers     map[string][]AdvertisableServer
     deviceIdToServer        map[string]AdvertisableServer
     rawSocket       net.PacketConn
     socket          *ipv4.PacketConn
     listener        SsdpListener
+    listenSearchTargets         map[string]bool
 }
 
 
@@ -204,6 +190,9 @@ func (s * ssdp) AdvertiseServer(ads AdvertisableServer) {
 
 func NewSsdp(l SsdpListener) (*ssdp, error) {
     var s ssdp
+    s.advertisableServers = make(map[string][]AdvertisableServer)
+    s.deviceIdToServer = make(map[string]AdvertisableServer)
+    s.listenSearchTargets = make(map[string]bool)
     s.listener = l
     if err := s.createSocket(); err != nil {
         return nil, err
