@@ -61,7 +61,6 @@ import (
 )
 
 var (
-    ssdpHeader = regexp.MustCompile(`^([^:]+):\s*(.*)$`)
     cacheControlAge = regexp.MustCompile(`.*max-age=([0-9]+).*`)
 )
 
@@ -400,7 +399,7 @@ func (s *ssdp) ListenFor(searchTarget string) error {
 
 
 func (s * ssdp) advertiseTimer(ads AdvertisableServer, d time.Duration) {
-    time.AfterFunc(10 * time.Second, func () {
+    time.AfterFunc(d, func () {
         s.advertiseServer(ads, true)
     })
 }
@@ -443,9 +442,13 @@ func (s * ssdp) advertiseServer(ads AdvertisableServer, alive bool) {
             heads,
             false,
         )
-    to, err := net.ResolveUDPAddr("udp", "239.255.255.250:1900")
+    to, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
     if err == nil {
-        s.socket.WriteTo(msg, nil, to)
+        if _, err := s.rawSocket.WriteTo(msg, to); err != nil {
+            log.Println("Failed to advertise: ", err)
+        } else {
+            log.Println("Advertise!")
+        }
     } else {
         log.Println("Error sending advertisement: ", err)
     }
@@ -470,12 +473,12 @@ func (s * ssdp) createSocket() error {
     group := net.IPv4(239, 255, 255, 250)
     interfaces, err := net.Interfaces()
     if err != nil {
-        log.Println("net.Interffaces")
+        log.Println("net.Interfaces error", err)
         return err
     }
     con, err := net.ListenPacket("udp4", "0.0.0.0:1900")
     if err != nil {
-        log.Println("listenPAcket")
+        log.Println("net.ListenPacket error: ", err)
         return err
     }
     p := ipv4.NewPacketConn(con)
