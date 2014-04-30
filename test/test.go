@@ -4,39 +4,59 @@ import (
     "github.com/fromkeith/gossdp"
     "log"
     "time"
+    //"os"
 )
 
 type blah struct {
 
 }
 
-func (b blah) AdvertiseAlive(headers map[string]string) {
-    log.Println("AdvertiseAlive")
+func (b blah) NotifyAlive(message gossdp.AliveMessage) {
+    log.Println("NotifyAlive")
 }
-func (b blah) AdvertiseBye(headers map[string]string) {
-    log.Println("AdvertiseBye")
+func (b blah) NotifyBye(message gossdp.ByeMessage) {
+    log.Println("NotifyBye")
 }
-func (b blah) Response(msg string, rinfo gossdp.RequestInfo) {
+func (b blah) Response(msg string, hostPort string) {
     log.Println("Response")
+}
+
+func testServer() {
+    s, err := gossdp.NewSsdp(nil)
+    if err != nil {
+        log.Println("Error creating ssdp server: ", err)
+        return
+    }
+    defer s.Stop()
+    go s.Start()
+
+    serverDef := gossdp.AdvertisableServer{
+        ServiceType: "fromkeith:test:web:0",
+        DeviceUuid: "hh0c2981-0029-44b7-4u04-27f187aecf78",
+        Location: "http://192.168.1.1:8080",
+        MaxAge: 3600,
+    }
+    s.AdvertiseServer(serverDef)
+    time.Sleep(30 * time.Second)
+}
+
+func testClient() {
+    b := blah{}
+    c, err := gossdp.NewSsdp(b)
+    if err != nil {
+        log.Println("Failed to start client: ", err)
+        return
+    }
+    defer c.Stop()
+    go c.Start()
+
+    c.ListenFor("fromkeith:test:web:0")
+    time.Sleep(30 * time.Second)
 }
 
 func main() {
 
-    s, err := gossdp.NewSsdp(blah{}, gossdp.GetSsdpSignature(),
-        "239.255.255.250",
-        "1900",
-        "1",
-        "1800",
-        "upnp/desc.html",
-        "uuid:f40c2981-7329-40b7-8b04-27f187aecfb5")
-    if err != nil {
-        log.Println("Error reating ssdp: ", err)
-        return
-    }
-    s.AddUsn("urn:yewwshare:1")
-    s.Server("", "")
-    time.AfterFunc(30 * time.Second, func () {
-        s.Stop()
-    })
-    s.Listen()
+    go testServer()
+    time.Sleep(5 * time.Second)
+    testClient()
 }
