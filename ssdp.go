@@ -56,10 +56,11 @@ import (
     "bytes"
     "errors"
     "strconv"
+    "net/http"
+    "bufio"
 )
 
 var (
-    httpHeader = regexp.MustCompile(`HTTP\/\d{1}\.\d{1} \d+ .*`)
     ssdpHeader = regexp.MustCompile(`^([^:]+):\s*(.*)$`)
     cacheControlAge = regexp.MustCompile(`.*max-age=([0-9]+).*`)
 )
@@ -83,14 +84,14 @@ type AliveMessage struct {
     Location        string
     MaxAge          int
     Server          string
-    RawHeaders      map[string]string
+    RawRequest      *http.Request
 }
 
 type ByeMessage struct {
     SearchType      string
     Usn             string
     DeviceId        string
-    RawHeaders      map[string]string
+    RawRequest      *http.Request
 }
 
 type ResponseMessage struct {
@@ -202,61 +203,49 @@ func NewSsdp(l SsdpListener) (*ssdp, error) {
 }
 
 func (s *ssdp) parseMessage(message, hostPort string) {
-    msgType := strings.Split(message, "\r\n")
-
-    if httpHeader.MatchString(msgType[0]) {
-        s.parseResponse(message, hostPort)
-    } else {
-        s.parseCommand(message, hostPort)
+    req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(message)))
+    if err != nil {
+        log.Println("Error parsing request: ", err)
+        //s.parseResponse(message, hostPort)
     }
+
+    if req.URL.Path != "*" {
+        log.Println("Unknown path requested: ", req.URL.Path)
+        return
+    }
+
+    s.parseCommand(req, hostPort)
 }
 
-func (s *ssdp) parseCommand(msg, hostPort string) {
-    msgContent := strings.Split(msg, "\r\n")
-    msgType := strings.Split(msgContent[0], " ")
-    method := msgType[0]
-
-    headers := make(map[string]string)
-
-    for _, line := range msgContent {
-        if len(line) > 0 {
-            matches := ssdpHeader.FindAllStringSubmatch(line, -1)
-            if len(matches) == 1 && len(matches[0]) == 3 {
-                headers[strings.ToUpper(matches[0][1])] = matches[0][2]
-            }
-        }
-    }
-
-    if method == "NOTIFY" {
-        s.notify(headers, msg)
+func (s *ssdp) parseCommand(req * http.Request, hostPort string) {
+    if req.Method == "NOTIFY" {
+        s.notify(req)
         return
     }
-    if method == "M-SEARCH" {
-        s.msearch(headers, msg, hostPort)
+    if req.Method == "M-SEARCH" {
+        s.msearch(req, hostPort)
         return
     }
-    log.Println("Unknown message type!. Message: " + msg + ". type:" + method)
+    log.Println("Unknown message type!. Message: " + req.Method)
 }
 
 
-func (s *ssdp) notify(headers map[string]string, msg string) {
+func (s *ssdp) notify(req * http.Request) {
     if s.listener == nil {
         return
     }
-    var nts string
-    var ok bool
-    if nts, ok = headers["NTS"]; !ok {
+    nts := req.Header.Get("NTS")
+    if nts == "" {
+        log.Println("Missing NTS in NOTIFY")
         return
     }
+    searchType := req.Header.Get("NT")
+    if searchType == "" {
+        log.Println("Missing NT in NOTIFY")
+        return
+    }
+    usn := req.Header.Get("USN")
 
-    var searchType string
-    if searchType, ok = headers["NT"]; !ok {
-        return
-    } else if _, ok = s.listenSearchTargets[searchType]; !ok {
-        log.Println("Ignoring SearchType: ", searchType)
-        return
-    }
-    usn, _ := headers["USN"]
     var deviceId string
     if len(usn) > 0 {
         parts := strings.Split(usn, ":")
@@ -269,10 +258,10 @@ func (s *ssdp) notify(headers map[string]string, msg string) {
 
     nts = strings.ToLower(nts)
     if nts == "ssdp:alive" {
-        location, _ := headers["LOCATION"]
-        server, _ := headers["SERVER"]
+        location := req.Header.Get("LOCATION")
+        server := req.Header.Get("SERVER")
         maxAge := -1
-        if cc, ok := headers["CACHE-CONTROL"]; ok {
+        if cc := req.Header.Get("CACHE-CONTROL"); cc != "" {
             subMatch := cacheControlAge.FindStringSubmatch(cc)
             if len(subMatch) == 2 {
                 maxAgeInt64, err := strconv.ParseInt(subMatch[1], 10, 0)
@@ -288,7 +277,7 @@ func (s *ssdp) notify(headers map[string]string, msg string) {
             Location        : location,
             MaxAge          : maxAge,
             Server          : server,
-            RawHeaders      : headers,
+            RawRequest      : req,
         }
         s.listener.NotifyAlive(message)
         return
@@ -298,26 +287,26 @@ func (s *ssdp) notify(headers map[string]string, msg string) {
             SearchType      : searchType,
             Usn             : usn,
             DeviceId        : deviceId,
-            RawHeaders      : headers,
+            RawRequest      : req,
         }
         s.listener.NotifyBye(message)
         return
     }
-    log.Println("could not identify NTS header!: " + msg)
+    log.Println("Could not identify NTS header!: " + nts)
 }
 
 
-func (s *ssdp) msearch(headers map[string]string, msg string, hostPort string) {
-    if _, ok := headers["MAN"]; !ok {
+func (s *ssdp) msearch(req * http.Request, hostPort string) {
+    if v := req.Header.Get("MAN"); v == "" {
         return
     }
-    if _, ok := headers["MX"]; !ok {
+    if v := req.Header.Get("MX"); v == "" {
         return
     }
-    if st, ok := headers["ST"]; !ok {
+    if st := req.Header.Get("ST"); st == "" {
         return
     } else {
-        s.inMSearch(st, 3, hostPort) // TODO: extract MX
+        s.inMSearch(st, req, hostPort) // TODO: extract MX
     }
 }
 
@@ -330,9 +319,16 @@ func (s *ssdp) parseResponse(msg, hostPort string) {
 }
 
 
-func (s *ssdp) inMSearch(st string, mx int, sendTo string) {
+func (s *ssdp) inMSearch(st string, req * http.Request, sendTo string) {
     if st[0] == '"' && st[len(st) - 1] == '"' {
         st = st[1:len(st) - 2]
+    }
+    mx := 0
+    if mxStr := req.Header.Get("MX"); mxStr != "" {
+        mxInt64, err := strconv.ParseInt(mxStr, 10, 0)
+        if err != nil {
+            mx = int(mxInt64)
+        }
     }
 
     // todo: use another routine for the timeout
