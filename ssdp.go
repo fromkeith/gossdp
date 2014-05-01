@@ -29,7 +29,56 @@
  */
 
 /*
+A very simple SSDP implementation.
 
+Client
+======
+    // create the client, passing in the listener, binding the socket
+    client err := gossdp.NewSsdp(b)
+    if err != nil {
+        log.Println("Failed to start client: ", err)
+        return
+    }
+    // call stop  when we are done
+    defer c.Stop()
+    // run! this will block until stop is called. so open it in a goroutine here
+    go c.Start()
+
+    // we saw what we are looking for
+    // and listen for it
+    err = c.ListenFor("urn:fromkeith:test:web:0")
+    if err != nil {
+        log.Println("Error ", err)
+    }
+
+Server
+======
+    // create the server, binding the socket
+    s, err := gossdp.NewSsdp(nil)
+    if err != nil {
+        log.Println("Error creating ssdp server: ", err)
+        return
+    }
+    // call stop  when we are done
+    defer s.Stop()
+    // run! this will block until stop is called. so open it in a goroutine here
+    go s.Start()
+
+    // Define the service we want to advertise
+    serverDef := gossdp.AdvertisableServer{
+        ServiceType: "urn:fromkeith:test:web:0",            // define the service type
+        DeviceUuid: "hh0c2981-0029-44b7-4u04-27f187aecf78", // make this unique!
+        Location: "http://192.168.1.1:8080",                // this is the location of the service we are advertising
+        MaxAge: 3600,                                       // Max age this advertisment is valid for
+    }
+    // start advertising it!
+    s.AdvertiseServer(serverDef)
+
+
+
+
+Misc
+====
 
 USN:
     uuid:device-UUID::upnp:rootdevice
@@ -65,16 +114,26 @@ import (
 var (
     cacheControlAge = regexp.MustCompile(`.*max-age=([0-9]+).*`)
     serverName = fmt.Sprintf("%s/0.0 UPnP/1.0 gossdp/0.1", runtime.GOOS)
-    socketLock sync.Mutex
 )
 
 type ssdp struct {
-    advertisableServers     map[string][]AdvertisableServer
-    deviceIdToServer        map[string]AdvertisableServer
+    advertisableServers     map[string][]*AdvertisableServer
+    deviceIdToServer        map[string]*AdvertisableServer
     rawSocket               net.PacketConn
     socket                  *ipv4.PacketConn
     listener                SsdpListener
     listenSearchTargets     map[string]bool
+    writeChannel            chan writeMessage
+    exitWriteWaitGroup      sync.WaitGroup
+    exitReadWaitGroup       sync.WaitGroup
+    interactionLock         sync.Mutex
+    isRunning               bool
+}
+
+type writeMessage struct {
+    message             []byte
+    to                  *net.UDPAddr
+    shouldExit          bool
 }
 
 
@@ -91,12 +150,19 @@ type ssdp struct {
 //      Cache-Control: max-age = 7393                // how long this is valid for. as defined by http standards
 //      SERVER: WIN/8.1 UPnP/1.0 gossdp/0.1                  // Concat of OS, UPnP, and product.
 type AliveMessage struct {
+    // Search Target. The urn: that defines what type of resource it is
     SearchType      string
+    // Its unique identifier
     DeviceId        string
+    // The USN of the service. uuid:DeviceId:SearchType
     Usn             string
+    // The location of the service being advertised
     Location        string
+    // How long this message should be considered valid for
     MaxAge          int
+    // The os/generic info about the SSDP server
     Server          string
+    // The parsed request
     RawRequest      *http.Request
 }
 
@@ -107,9 +173,13 @@ type AliveMessage struct {
 //      NTS: ssdp:byebye
 //      USN: uuid:the:unique
 type ByeMessage struct {
+    // Search Target. The urn: that defines what type of resource it is
     SearchType      string
-    Usn             string
+    // Its unique identifier
     DeviceId        string
+    // The USN of the service. uuid:DeviceId:SearchType
+    Usn             string
+    // The parsed request
     RawRequest      *http.Request
 }
 
@@ -123,18 +193,28 @@ type ByeMessage struct {
 //      SERVER: WIN/8.1 UPnP/1.0 gossdp/0.1                  // Concat of OS, UPnP, and product.
 //      DATE: date of response                               // rfc1123-date of the response
 type ResponseMessage struct {
+    // How long this message should be considered valid for
     MaxAge              int
+    // Search Target. The urn: that defines what type of resource it is
     SearchType          string
-    Usn                 string
+    // Its unique identifier
     DeviceId            string
+    // The USN of the service. uuid:DeviceId:SearchType
+    Usn                 string
+    // The location of the service being advertised
     Location            string
+    // The os/generic info about the SSDP server
     Server              string
+    // The parsed response
     RawResponse         *http.Response
 }
 
 type SsdpListener interface {
+    // Notified on ssdp:alive messages. Only for those we are listening for.
     NotifyAlive(message AliveMessage)
+    // Notified on ssdp:byebye messages. Only for those we are listening for.
     NotifyBye(message ByeMessage)
+    // Notified on M-SEARCH responses.
     Response(message ResponseMessage)
 }
 
@@ -154,7 +234,7 @@ type SsdpListener interface {
 
 
 
-
+// Describes the server/service we wish to advertise
 type AdvertisableServer struct {
     // The type of this service. In the URN it is pasted after the device-UUID.
     //  It is what devices will search for
@@ -167,34 +247,86 @@ type AdvertisableServer struct {
     MaxAge                  int
 
     usn                     string
+    lastTimer               *time.Timer
+    last3sTimer             *time.Timer
 }
 
 // Register a service to advertise
 // Should only be called once per server
 // This implementation will automatically adverise when maxAge expires.
 func (s * ssdp) AdvertiseServer(ads AdvertisableServer) {
-    ads.usn = fmt.Sprintf("uuid:%s::%s", ads.DeviceUuid, ads.ServiceType)
-    if v, ok := s.advertisableServers[ads.ServiceType]; ok {
-        s.advertisableServers[ads.ServiceType] = append(v, ads)
-    } else {
-        s.advertisableServers[ads.ServiceType] = []AdvertisableServer{ads}
+    s.interactionLock.Lock()
+    defer s.interactionLock.Unlock()
+    if !s.isRunning {
+        return
     }
-    s.deviceIdToServer[ads.DeviceUuid] = ads
-    s.advertiseTimer(ads, 0 * time.Second, ads.MaxAge)
-    s.advertiseTimer(ads, 3 * time.Second, ads.MaxAge)
+
+    adsPointer := &ads
+
+    adsPointer.usn = fmt.Sprintf("uuid:%s::%s", adsPointer.DeviceUuid, adsPointer.ServiceType)
+    if v, ok := s.advertisableServers[adsPointer.ServiceType]; ok {
+        s.advertisableServers[adsPointer.ServiceType] = append(v, adsPointer)
+    } else {
+        s.advertisableServers[adsPointer.ServiceType] = []*AdvertisableServer{adsPointer}
+    }
+    s.deviceIdToServer[adsPointer.DeviceUuid] = adsPointer
+    adsPointer.lastTimer = s.advertiseTimer(adsPointer, 1 * time.Second, adsPointer.MaxAge)
+    adsPointer.last3sTimer = s.advertiseTimer(adsPointer, 3 * time.Second, adsPointer.MaxAge)
+}
+
+
+func (s * ssdp) RemoveServer(deviceUuid string) {
+    s.interactionLock.Lock()
+    defer s.interactionLock.Unlock()
+    if !s.isRunning {
+        return
+    }
+
+
+    var ads *AdvertisableServer
+    var ok bool
+    if ads, ok = s.deviceIdToServer[deviceUuid]; !ok {
+        return
+    }
+    ads.lastTimer.Stop()
+    ads.last3sTimer.Stop()
+    delete(s.deviceIdToServer, deviceUuid)
+    var group []*AdvertisableServer
+    if group, ok = s.advertisableServers[ads.ServiceType]; !ok {
+        return
+    }
+    if len(group) == 1 {
+        delete(s.advertisableServers, ads.ServiceType)
+        return
+    }
+    for i := range group {
+        if group[i].DeviceUuid == ads.DeviceUuid {
+            newGroup := make([]*AdvertisableServer, len(group) - 1)
+            if i > 0 {
+                copy(newGroup, group[:i])
+            }
+            if i < len(group) - 1 {
+                copy(newGroup[i:], group[i+1:len(group)])
+            }
+            s.advertisableServers[ads.ServiceType] = newGroup
+            break
+        }
+    }
 }
 
 
 // Creates a new server/client
 func NewSsdp(l SsdpListener) (*ssdp, error) {
     var s ssdp
-    s.advertisableServers = make(map[string][]AdvertisableServer)
-    s.deviceIdToServer = make(map[string]AdvertisableServer)
+    s.advertisableServers = make(map[string][]*AdvertisableServer)
+    s.deviceIdToServer = make(map[string]*AdvertisableServer)
     s.listenSearchTargets = make(map[string]bool)
     s.listener = l
+    s.writeChannel = make(chan writeMessage)
     if err := s.createSocket(); err != nil {
         return nil, err
     }
+    s.isRunning = true
 
     return &s, nil
 }
@@ -385,7 +517,7 @@ func (s *ssdp) inMSearch(st string, req * http.Request, sendTo string) {
     }
 }
 
-func (s * ssdp) respondToMSearch(ads AdvertisableServer, sendTo string) {
+func (s * ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
     msg := s.createSsdpHeader(
         "200 OK",
         map[string]string{
@@ -400,27 +532,25 @@ func (s * ssdp) respondToMSearch(ads AdvertisableServer, sendTo string) {
         true,
     )
 
-    socketLock.Lock()
-    defer socketLock.Unlock()
-    if s.rawSocket == nil {
-        return
-    }
-
     addr, err := net.ResolveUDPAddr("udp4", sendTo)
     if err != nil {
         log.Println("Error resolving UDP addr: ", err)
         return
     }
-    _, err = s.rawSocket.WriteTo(msg, addr)
-    if err != nil {
-        log.Println("WriteTo: ", err)
-    }
+
+    s.writeChannel <- writeMessage{msg, addr, false}
 }
 
 // Sends out 1 M-SEARCH request for the specified target.
 // Also filters any NOTIFIES that are sent, so only the ones specified here
 // are reported to the listener.
 func (s *ssdp) ListenFor(searchTarget string) error {
+    s.interactionLock.Lock()
+    defer s.interactionLock.Unlock()
+    if !s.isRunning {
+        return errors.New("Not running. Can't listen")
+    }
+
 
     // listen directly for their search target
     s.listenSearchTargets[searchTarget] = true
@@ -436,53 +566,57 @@ func (s *ssdp) ListenFor(searchTarget string) error {
         false,
     )
 
-    socketLock.Lock()
-    defer socketLock.Unlock()
-    if s.rawSocket == nil {
-        return errors.New("Socket is not valid!")
-    }
-
     addr, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
     if err != nil {
         return err
     }
-    _, err = s.rawSocket.WriteTo(msg, addr)
+    s.writeChannel <- writeMessage{msg, addr, false}
     return err
 }
 
 
-func (s * ssdp) advertiseTimer(ads AdvertisableServer, d time.Duration, age int) {
-    time.AfterFunc(d, func () {
+func (s * ssdp) advertiseTimer(ads *AdvertisableServer, d time.Duration, age int) *time.Timer {
+    var timer *time.Timer
+    timer = time.AfterFunc(d, func () {
         s.advertiseServer(ads, true)
-        s.advertiseTimer(ads, d + time.Duration(age) * time.Second, age)
+        timer.Reset(d + time.Duration(age) * time.Second)
     })
+    return timer
 }
 
 
 // Kills the server/client by closing the socket.
 // If any servers are being advertised they will NOTIFY a byebye
 func (s *ssdp) Stop() {
-    socketLock.Lock()
-    defer socketLock.Unlock()
+    s.interactionLock.Lock()
+    s.isRunning = false
+    s.interactionLock.Unlock()
 
     if s.socket != nil {
         if len(s.advertisableServers) > 0 {
             s.advertiseClosed()
         }
+        s.writeChannel <- writeMessage{nil, nil, true}
+        s.exitWriteWaitGroup.Wait()
+        close(s.writeChannel)
         s.socket.Close()
-        s.socket = nil
         s.rawSocket.Close()
+        s.exitReadWaitGroup.Wait()
+        s.socket = nil
         s.rawSocket = nil
     }
+    log.Println("Stop exiting")
 }
 
 func (s * ssdp) advertiseClosed() {
     for _, ad := range s.deviceIdToServer {
+        ad.lastTimer.Stop()
+        ad.last3sTimer.Stop()
         s.advertiseServer(ad, false)
     }
 }
 
-func (s * ssdp) advertiseServer(ads AdvertisableServer, alive bool) {
+func (s * ssdp) advertiseServer(ads *AdvertisableServer, alive bool) {
     ntsString := "ssdp:alive"
     if !alive {
         ntsString = "ssdp:byebye"
@@ -505,19 +639,9 @@ func (s * ssdp) advertiseServer(ads AdvertisableServer, alive bool) {
             false,
         )
 
-    socketLock.Lock()
-    defer socketLock.Unlock()
-    if s.rawSocket == nil {
-        return
-    }
-
     to, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
     if err == nil {
-        if _, err := s.rawSocket.WriteTo(msg, to); err != nil {
-            log.Println("Failed to advertise: ", err)
-        } else {
-            log.Println("Advertise!")
-        }
+        s.writeChannel <- writeMessage{msg, to, false}
     } else {
         log.Println("Error sending advertisement: ", err)
     }
@@ -538,8 +662,6 @@ func (s * ssdp) createSsdpHeader(head string, vars map[string]string, res bool) 
 }
 
 func (s * ssdp) createSocket() error {
-    socketLock.Lock()
-    defer socketLock.Unlock()
     group := net.IPv4(239, 255, 255, 250)
     interfaces, err := net.Interfaces()
     if err != nil {
@@ -571,6 +693,13 @@ func (s * ssdp) createSocket() error {
 }
 
 func (s * ssdp) Start() {
+    go s.socketWriter()
+    s.socketReader()
+}
+
+func (s * ssdp) socketReader() {
+    s.exitReadWaitGroup.Add(1)
+    defer s.exitReadWaitGroup.Add(-1)
     readBytes := make([]byte, 2048)
     for {
         n, src, err := s.rawSocket.ReadFrom(readBytes)
@@ -581,6 +710,24 @@ func (s * ssdp) Start() {
         if n > 0 {
             //log.Println("Message: ", string(readBytes[0:n]))
             s.parseMessage(string(readBytes[0:n]), src.String())
+        }
+    }
+}
+
+func (s * ssdp) socketWriter() {
+    s.exitWriteWaitGroup.Add(1)
+    defer s.exitWriteWaitGroup.Add(-1)
+    for {
+        msg, more := <- s.writeChannel
+        if !more {
+            return
+        }
+        if msg.shouldExit {
+            return
+        }
+        _, err := s.rawSocket.WriteTo(msg.message, msg.to)
+        if err != nil {
+            log.Println("Error sending message. ", err)
         }
     }
 }
