@@ -651,9 +651,9 @@ func (s * ssdp) advertiseServer(ads *AdvertisableServer, alive bool) {
     }
 }
 
-func (s * ssdp) createSsdpHeader(head string, vars map[string]string, res bool) []byte {
+func (s * ssdp) createSsdpHeader(head string, vars map[string]string, isResponse bool) []byte {
     buf := bytes.Buffer{}
-    if res {
+    if isResponse {
         buf.WriteString(fmt.Sprintf("HTTP/1.1 %s\r\n", head))
     } else {
         buf.WriteString(fmt.Sprintf("%s * HTTP/1.1\r\n", head))
