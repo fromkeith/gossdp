@@ -332,9 +332,13 @@ func NewSsdp(l SsdpListener) (*ssdp, error) {
 }
 
 func (s *ssdp) parseMessage(message, hostPort string) {
+    if strings.HasPrefix(message, "HTTP") {
+        s.parseResponse(message, hostPort)
+        return
+    }
     req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(message)))
     if err != nil {
-        s.parseResponse(message, hostPort)
+        log.Println("Error reading request: ", err)
         return
     }
 
