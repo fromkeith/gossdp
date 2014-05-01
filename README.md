@@ -3,8 +3,6 @@ gossdp
 
 This is a golang port of node-ssdp, as found here: https://github.com/diversario/node-ssdp
 
-Warning: Some parts are still hardcoded. This port is still under some development and testing.
-
 
 License
 =======
