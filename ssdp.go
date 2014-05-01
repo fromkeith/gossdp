@@ -59,11 +59,13 @@ import (
     "net/http"
     "bufio"
     "runtime"
+    "sync"
 )
 
 var (
     cacheControlAge = regexp.MustCompile(`.*max-age=([0-9]+).*`)
     serverName = fmt.Sprintf("%s/0.0 UPnP/1.0 gossdp/0.1", runtime.GOOS)
+    socketLock sync.Mutex
 )
 
 type ssdp struct {
@@ -169,6 +171,7 @@ type AdvertisableServer struct {
 
 // Register a service to advertise
 // Should only be called once per server
+// This implementation will automatically adverise when maxAge expires.
 func (s * ssdp) AdvertiseServer(ads AdvertisableServer) {
     ads.usn = fmt.Sprintf("uuid:%s::%s", ads.DeviceUuid, ads.ServiceType)
     if v, ok := s.advertisableServers[ads.ServiceType]; ok {
@@ -396,6 +399,13 @@ func (s * ssdp) respondToMSearch(ads AdvertisableServer, sendTo string) {
         },
         true,
     )
+
+    socketLock.Lock()
+    defer socketLock.Unlock()
+    if s.rawSocket == nil {
+        return
+    }
+
     addr, err := net.ResolveUDPAddr("udp4", sendTo)
     if err != nil {
         log.Println("Error resolving UDP addr: ", err)
@@ -407,6 +417,9 @@ func (s * ssdp) respondToMSearch(ads AdvertisableServer, sendTo string) {
     }
 }
 
+// Sends out 1 M-SEARCH request for the specified target.
+// Also filters any NOTIFIES that are sent, so only the ones specified here
+// are reported to the listener.
 func (s *ssdp) ListenFor(searchTarget string) error {
 
     // listen directly for their search target
@@ -422,6 +435,13 @@ func (s *ssdp) ListenFor(searchTarget string) error {
         },
         false,
     )
+
+    socketLock.Lock()
+    defer socketLock.Unlock()
+    if s.rawSocket == nil {
+        return errors.New("Socket is not valid!")
+    }
+
     addr, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
     if err != nil {
         return err
@@ -439,11 +459,16 @@ func (s * ssdp) advertiseTimer(ads AdvertisableServer, d time.Duration, age int)
 }
 
 
+// Kills the server/client by closing the socket.
+// If any servers are being advertised they will NOTIFY a byebye
 func (s *ssdp) Stop() {
+    socketLock.Lock()
+    defer socketLock.Unlock()
+
     if s.socket != nil {
-        // TODO: advertise bye for everyone.s
-        //s.advertise(false)
-        //s.advertise(false)
+        if len(s.advertisableServers) > 0 {
+            s.advertiseClosed()
+        }
         s.socket.Close()
         s.socket = nil
         s.rawSocket.Close()
@@ -451,10 +476,13 @@ func (s *ssdp) Stop() {
     }
 }
 
-func (s * ssdp) advertiseServer(ads AdvertisableServer, alive bool) {
-    if s.socket == nil {
-        return
+func (s * ssdp) advertiseClosed() {
+    for _, ad := range s.deviceIdToServer {
+        s.advertiseServer(ad, false)
     }
+}
+
+func (s * ssdp) advertiseServer(ads AdvertisableServer, alive bool) {
     ntsString := "ssdp:alive"
     if !alive {
         ntsString = "ssdp:byebye"
@@ -476,6 +504,13 @@ func (s * ssdp) advertiseServer(ads AdvertisableServer, alive bool) {
             heads,
             false,
         )
+
+    socketLock.Lock()
+    defer socketLock.Unlock()
+    if s.rawSocket == nil {
+        return
+    }
+
     to, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
     if err == nil {
         if _, err := s.rawSocket.WriteTo(msg, to); err != nil {
@@ -503,7 +538,8 @@ func (s * ssdp) createSsdpHeader(head string, vars map[string]string, res bool) 
 }
 
 func (s * ssdp) createSocket() error {
-
+    socketLock.Lock()
+    defer socketLock.Unlock()
     group := net.IPv4(239, 255, 255, 250)
     interfaces, err := net.Interfaces()
     if err != nil {
@@ -543,7 +579,7 @@ func (s * ssdp) Start() {
             return
         }
         if n > 0 {
-            log.Println("Message: ", string(readBytes[0:n]))
+            //log.Println("Message: ", string(readBytes[0:n]))
             s.parseMessage(string(readBytes[0:n]), src.String())
         }
     }
