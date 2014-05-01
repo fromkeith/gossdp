@@ -58,19 +58,21 @@ import (
     "strconv"
     "net/http"
     "bufio"
+    "runtime"
 )
 
 var (
     cacheControlAge = regexp.MustCompile(`.*max-age=([0-9]+).*`)
+    serverName = fmt.Sprintf("%s/0.0 UPnP/1.0 gossdp/0.1", runtime.GOOS)
 )
 
 type ssdp struct {
     advertisableServers     map[string][]AdvertisableServer
     deviceIdToServer        map[string]AdvertisableServer
-    rawSocket       net.PacketConn
-    socket          *ipv4.PacketConn
-    listener        SsdpListener
-    listenSearchTargets         map[string]bool
+    rawSocket               net.PacketConn
+    socket                  *ipv4.PacketConn
+    listener                SsdpListener
+    listenSearchTargets     map[string]bool
 }
 
 
@@ -165,11 +167,8 @@ type AdvertisableServer struct {
     usn                     string
 }
 
-const (
-    serverName = "windows/8.1 UPnP/1.0 gossdp/0.1"
-)
-
 // Register a service to advertise
+// Should only be called once per server
 func (s * ssdp) AdvertiseServer(ads AdvertisableServer) {
     ads.usn = fmt.Sprintf("uuid:%s::%s", ads.DeviceUuid, ads.ServiceType)
     if v, ok := s.advertisableServers[ads.ServiceType]; ok {
@@ -178,14 +177,12 @@ func (s * ssdp) AdvertiseServer(ads AdvertisableServer) {
         s.advertisableServers[ads.ServiceType] = []AdvertisableServer{ads}
     }
     s.deviceIdToServer[ads.DeviceUuid] = ads
-    s.advertiseTimer(ads, 0 * time.Second)
-    s.advertiseTimer(ads, 1 * time.Second)
-    s.advertiseTimer(ads, 3 * time.Second)
-    s.advertiseTimer(ads, 10 * time.Second)
+    s.advertiseTimer(ads, 0 * time.Second, ads.MaxAge)
+    s.advertiseTimer(ads, 3 * time.Second, ads.MaxAge)
 }
 
 
-
+// Creates a new server/client
 func NewSsdp(l SsdpListener) (*ssdp, error) {
     var s ssdp
     s.advertisableServers = make(map[string][]AdvertisableServer)
@@ -262,7 +259,7 @@ func (s *ssdp) notify(req * http.Request) {
             subMatch := cacheControlAge.FindStringSubmatch(cc)
             if len(subMatch) == 2 {
                 maxAgeInt64, err := strconv.ParseInt(subMatch[1], 10, 0)
-                if err != nil {
+                if err == nil {
                     maxAge = int(maxAgeInt64)
                 }
             }
@@ -324,7 +321,7 @@ func (s *ssdp) parseResponse(msg, hostPort string) {
         subMatch := cacheControlAge.FindStringSubmatch(cc)
         if len(subMatch) == 2 {
             maxAgeInt64, err := strconv.ParseInt(subMatch[1], 10, 0)
-            if err != nil {
+            if err == nil {
                 maxAge = int(maxAgeInt64)
             }
         }
@@ -434,9 +431,10 @@ func (s *ssdp) ListenFor(searchTarget string) error {
 }
 
 
-func (s * ssdp) advertiseTimer(ads AdvertisableServer, d time.Duration) {
+func (s * ssdp) advertiseTimer(ads AdvertisableServer, d time.Duration, age int) {
     time.AfterFunc(d, func () {
         s.advertiseServer(ads, true)
+        s.advertiseTimer(ads, d + time.Duration(age) * time.Second, age)
     })
 }
 
