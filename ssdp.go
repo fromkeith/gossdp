@@ -116,7 +116,7 @@ var (
     serverName = fmt.Sprintf("%s/0.0 UPnP/1.0 gossdp/0.1", runtime.GOOS)
 )
 
-type ssdp struct {
+type Ssdp struct {
     advertisableServers     map[string][]*AdvertisableServer
     deviceIdToServer        map[string]*AdvertisableServer
     rawSocket               net.PacketConn
@@ -254,7 +254,7 @@ type AdvertisableServer struct {
 // Register a service to advertise
 // Should only be called once per server
 // This implementation will automatically adverise when maxAge expires.
-func (s * ssdp) AdvertiseServer(ads AdvertisableServer) {
+func (s *Ssdp) AdvertiseServer(ads AdvertisableServer) {
     s.interactionLock.Lock()
     defer s.interactionLock.Unlock()
     if !s.isRunning {
@@ -275,7 +275,7 @@ func (s * ssdp) AdvertiseServer(ads AdvertisableServer) {
 }
 
 
-func (s * ssdp) RemoveServer(deviceUuid string) {
+func (s *Ssdp) RemoveServer(deviceUuid string) {
     s.interactionLock.Lock()
     defer s.interactionLock.Unlock()
     if !s.isRunning {
@@ -316,8 +316,8 @@ func (s * ssdp) RemoveServer(deviceUuid string) {
 
 
 // Creates a new server/client
-func NewSsdp(l SsdpListener) (*ssdp, error) {
-    var s ssdp
+func NewSsdp(l SsdpListener) (*Ssdp, error) {
+    var s Ssdp
     s.advertisableServers = make(map[string][]*AdvertisableServer)
     s.deviceIdToServer = make(map[string]*AdvertisableServer)
     s.listenSearchTargets = make(map[string]bool)
@@ -331,7 +331,7 @@ func NewSsdp(l SsdpListener) (*ssdp, error) {
     return &s, nil
 }
 
-func (s *ssdp) parseMessage(message, hostPort string) {
+func (s *Ssdp) parseMessage(message, hostPort string) {
     if strings.HasPrefix(message, "HTTP") {
         s.parseResponse(message, hostPort)
         return
@@ -350,7 +350,7 @@ func (s *ssdp) parseMessage(message, hostPort string) {
     s.parseCommand(req, hostPort)
 }
 
-func (s *ssdp) parseCommand(req * http.Request, hostPort string) {
+func (s *Ssdp) parseCommand(req * http.Request, hostPort string) {
     if req.Method == "NOTIFY" {
         s.notify(req)
         return
@@ -363,7 +363,7 @@ func (s *ssdp) parseCommand(req * http.Request, hostPort string) {
 }
 
 
-func (s *ssdp) notify(req * http.Request) {
+func (s *Ssdp) notify(req * http.Request) {
     if s.listener == nil {
         return
     }
@@ -429,7 +429,7 @@ func (s *ssdp) notify(req * http.Request) {
 }
 
 
-func (s *ssdp) msearch(req * http.Request, hostPort string) {
+func (s *Ssdp) msearch(req * http.Request, hostPort string) {
     if v := req.Header.Get("MAN"); v == "" {
         return
     }
@@ -444,7 +444,7 @@ func (s *ssdp) msearch(req * http.Request, hostPort string) {
 }
 
 
-func (s *ssdp) parseResponse(msg, hostPort string) {
+func (s *Ssdp) parseResponse(msg, hostPort string) {
     if s.listener == nil {
         return
     }
@@ -490,7 +490,7 @@ func (s *ssdp) parseResponse(msg, hostPort string) {
 }
 
 
-func (s *ssdp) inMSearch(st string, req * http.Request, sendTo string) {
+func (s *Ssdp) inMSearch(st string, req * http.Request, sendTo string) {
     if st[0] == '"' && st[len(st) - 1] == '"' {
         st = st[1:len(st) - 2]
     }
@@ -521,7 +521,7 @@ func (s *ssdp) inMSearch(st string, req * http.Request, sendTo string) {
     }
 }
 
-func (s * ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
+func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
     msg := s.createSsdpHeader(
         "200 OK",
         map[string]string{
@@ -548,7 +548,7 @@ func (s * ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
 // Sends out 1 M-SEARCH request for the specified target.
 // Also filters any NOTIFIES that are sent, so only the ones specified here
 // are reported to the listener.
-func (s *ssdp) ListenFor(searchTarget string) error {
+func (s *Ssdp) ListenFor(searchTarget string) error {
     s.interactionLock.Lock()
     defer s.interactionLock.Unlock()
     if !s.isRunning {
@@ -574,12 +574,17 @@ func (s *ssdp) ListenFor(searchTarget string) error {
     if err != nil {
         return err
     }
-    s.writeChannel <- writeMessage{msg, addr, false}
+    // run in a goroutine, because Start may not have been called yet
+    // and thus s.writeChannel will block!
+    go func() {
+        s.writeChannel <- writeMessage{msg, addr, false}
+    }()
+
     return err
 }
 
 
-func (s * ssdp) advertiseTimer(ads *AdvertisableServer, d time.Duration, age int) *time.Timer {
+func (s *Ssdp) advertiseTimer(ads *AdvertisableServer, d time.Duration, age int) *time.Timer {
     var timer *time.Timer
     timer = time.AfterFunc(d, func () {
         s.advertiseServer(ads, true)
@@ -591,7 +596,7 @@ func (s * ssdp) advertiseTimer(ads *AdvertisableServer, d time.Duration, age int
 
 // Kills the server/client by closing the socket.
 // If any servers are being advertised they will NOTIFY a byebye
-func (s *ssdp) Stop() {
+func (s *Ssdp) Stop() {
     s.interactionLock.Lock()
     s.isRunning = false
     s.interactionLock.Unlock()
@@ -612,7 +617,7 @@ func (s *ssdp) Stop() {
     log.Println("Stop exiting")
 }
 
-func (s * ssdp) advertiseClosed() {
+func (s *Ssdp) advertiseClosed() {
     for _, ad := range s.deviceIdToServer {
         ad.lastTimer.Stop()
         ad.last3sTimer.Stop()
@@ -620,7 +625,7 @@ func (s * ssdp) advertiseClosed() {
     }
 }
 
-func (s * ssdp) advertiseServer(ads *AdvertisableServer, alive bool) {
+func (s *Ssdp) advertiseServer(ads *AdvertisableServer, alive bool) {
     ntsString := "ssdp:alive"
     if !alive {
         ntsString = "ssdp:byebye"
@@ -651,7 +656,7 @@ func (s * ssdp) advertiseServer(ads *AdvertisableServer, alive bool) {
     }
 }
 
-func (s * ssdp) createSsdpHeader(head string, vars map[string]string, isResponse bool) []byte {
+func (s *Ssdp) createSsdpHeader(head string, vars map[string]string, isResponse bool) []byte {
     buf := bytes.Buffer{}
     if isResponse {
         buf.WriteString(fmt.Sprintf("HTTP/1.1 %s\r\n", head))
@@ -665,7 +670,7 @@ func (s * ssdp) createSsdpHeader(head string, vars map[string]string, isResponse
     return []byte(buf.String())
 }
 
-func (s * ssdp) createSocket() error {
+func (s *Ssdp) createSocket() error {
     group := net.IPv4(239, 255, 255, 250)
     interfaces, err := net.Interfaces()
     if err != nil {
@@ -697,13 +702,12 @@ func (s * ssdp) createSocket() error {
 }
 
 // Starts listening to packets on the network.
-// Should be called before registering any listeners or advertisers.
-func (s * ssdp) Start() {
+func (s *Ssdp) Start() {
     go s.socketWriter()
     s.socketReader()
 }
 
-func (s * ssdp) socketReader() {
+func (s *Ssdp) socketReader() {
     s.exitReadWaitGroup.Add(1)
     defer s.exitReadWaitGroup.Add(-1)
     readBytes := make([]byte, 2048)
@@ -720,7 +724,7 @@ func (s * ssdp) socketReader() {
     }
 }
 
-func (s * ssdp) socketWriter() {
+func (s *Ssdp) socketWriter() {
     s.exitWriteWaitGroup.Add(1)
     defer s.exitWriteWaitGroup.Add(-1)
     for {
