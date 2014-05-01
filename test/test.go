@@ -55,8 +55,8 @@ func testClient() {
 }
 
 func main() {
-    //testServer()
+    testServer()
     //go testServer()
     //time.Sleep(5 * time.Second)
-    testClient()
+    //testClient()
 }

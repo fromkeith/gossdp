@@ -202,7 +202,6 @@ func NewSsdp(l SsdpListener) (*ssdp, error) {
 func (s *ssdp) parseMessage(message, hostPort string) {
     req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(message)))
     if err != nil {
-        log.Println("Error parsing request: ", err)
         s.parseResponse(message, hostPort)
         return
     }
