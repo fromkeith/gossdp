@@ -138,7 +138,6 @@ type writeMessage struct {
 
 
 // The common SSDP fields in the Notify ssdp:alive message.
-// Raw headers are in RawHeaders, and names are all uppercase.\
 //
 // Notify (alive)
 //      NOTIFY * HTTP/1.1
@@ -166,7 +165,7 @@ type AliveMessage struct {
     RawRequest      *http.Request
 }
 
-// Notify (bye): server-only:
+// Notify (bye):
 //      NOTIFY * HTTP/1.1
 //      Host: 239.255.255.250:1900
 //      NT: search:target
@@ -183,7 +182,7 @@ type ByeMessage struct {
     RawRequest      *http.Request
 }
 
-// search-response: server-only:
+// M-Search Response:
 //      HTTP/1.1 200 OK
 //      Ext:                                                 // required by http extension framework. just key, no value
 //      Cache-Control: max-age = 5000                        // number of seconds this message is valid for
@@ -209,6 +208,7 @@ type ResponseMessage struct {
     RawResponse         *http.Response
 }
 
+// Listener to recieve events.
 type SsdpListener interface {
     // Notified on ssdp:alive messages. Only for those we are listening for.
     NotifyAlive(message AliveMessage)
