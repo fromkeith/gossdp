@@ -696,6 +696,8 @@ func (s * ssdp) createSocket() error {
     return nil
 }
 
+// Starts listening to packets on the network.
+// Should be called before registering any listeners or advertisers.
 func (s * ssdp) Start() {
     go s.socketWriter()
     s.socketReader()
