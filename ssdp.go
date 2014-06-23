@@ -111,11 +111,38 @@ import (
     "sync"
 )
 
+// a small interface to intercept all of my logs
+type LoggerInterface interface {
+    Tracef(fmt string, args ... interface{})
+    Infof(fmt string, args ... interface{})
+    Warnf(fmt string, args ... interface{})
+    Errorf(fmt string, args ... interface{})
+}
+
+// a default implementation of the LoggerInterface, simply using the 'log' library
+type DefaultLogger struct {}
+
+func (l DefaultLogger) Tracef(fmt string, args ... interface{}) {
+    log.Printf(fmt + "\n", args...)
+}
+
+func (l DefaultLogger) Infof(fmt string, args ... interface{}) {
+    log.Printf(fmt + "\n", args...)
+}
+func (l DefaultLogger) Warnf(fmt string, args ... interface{}) {
+    log.Printf(fmt + "\n", args...)
+}
+func (l DefaultLogger) Errorf(fmt string, args ... interface{}) {
+    log.Printf(fmt + "\n", args...)
+}
+
+
 var (
     cacheControlAge = regexp.MustCompile(`.*max-age=([0-9]+).*`)
     serverName = fmt.Sprintf("%s/0.0 UPnP/1.0 gossdp/0.1", runtime.GOOS)
 )
 
+// a SSDP defintion
 type Ssdp struct {
     advertisableServers     map[string][]*AdvertisableServer
     deviceIdToServer        map[string]*AdvertisableServer
@@ -128,6 +155,7 @@ type Ssdp struct {
     exitReadWaitGroup       sync.WaitGroup
     interactionLock         sync.Mutex
     isRunning               bool
+    logger                  LoggerInterface
 }
 
 type writeMessage struct {
@@ -317,12 +345,17 @@ func (s *Ssdp) RemoveServer(deviceUuid string) {
 
 // Creates a new server/client
 func NewSsdp(l SsdpListener) (*Ssdp, error) {
+    return NewSsdpWithLogger(l, DefaultLogger{})
+}
+
+func NewSsdpWithLogger(l SsdpListener, lg LoggerInterface) (*Ssdp, error) {
     var s Ssdp
     s.advertisableServers = make(map[string][]*AdvertisableServer)
     s.deviceIdToServer = make(map[string]*AdvertisableServer)
     s.listenSearchTargets = make(map[string]bool)
     s.listener = l
     s.writeChannel = make(chan writeMessage)
+    s.logger = lg
     if err := s.createSocket(); err != nil {
         return nil, err
     }
@@ -338,12 +371,12 @@ func (s *Ssdp) parseMessage(message, hostPort string) {
     }
     req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(message)))
     if err != nil {
-        log.Println("Error reading request: ", err)
+        s.logger.Warnf("Error reading request: ", err)
         return
     }
 
     if req.URL.Path != "*" {
-        log.Println("Unknown path requested: ", req.URL.Path)
+        s.logger.Warnf("Unknown path requested: ", req.URL.Path)
         return
     }
 
@@ -359,7 +392,7 @@ func (s *Ssdp) parseCommand(req * http.Request, hostPort string) {
         s.msearch(req, hostPort)
         return
     }
-    log.Println("Unknown message type!. Message: " + req.Method)
+    s.logger.Warnf("Unknown message type!. Message: " + req.Method)
 }
 
 
@@ -369,12 +402,12 @@ func (s *Ssdp) notify(req * http.Request) {
     }
     nts := req.Header.Get("NTS")
     if nts == "" {
-        log.Println("Missing NTS in NOTIFY")
+        s.logger.Warnf("Missing NTS in NOTIFY")
         return
     }
     searchType := req.Header.Get("NT")
     if searchType == "" {
-        log.Println("Missing NT in NOTIFY")
+        s.logger.Warnf("Missing NT in NOTIFY")
         return
     }
     usn := req.Header.Get("USN")
@@ -425,7 +458,7 @@ func (s *Ssdp) notify(req * http.Request) {
         s.listener.NotifyBye(message)
         return
     }
-    log.Println("Could not identify NTS header!: " + nts)
+    s.logger.Warnf("Could not identify NTS header!: " + nts)
 }
 
 
@@ -450,7 +483,7 @@ func (s *Ssdp) parseResponse(msg, hostPort string) {
     }
     resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(msg)), nil)
     if err != nil {
-        log.Println("Not a valid response! ", err)
+        s.logger.Warnf("Not a valid response! ", err)
         return
     }
     defer resp.Body.Close()
@@ -538,7 +571,7 @@ func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
 
     addr, err := net.ResolveUDPAddr("udp4", sendTo)
     if err != nil {
-        log.Println("Error resolving UDP addr: ", err)
+        s.logger.Errorf("Error resolving UDP addr: ", err)
         return
     }
 
@@ -614,7 +647,7 @@ func (s *Ssdp) Stop() {
         s.socket = nil
         s.rawSocket = nil
     }
-    log.Println("Stop exiting")
+    s.logger.Tracef("Stop exiting")
 }
 
 func (s *Ssdp) advertiseClosed() {
@@ -652,7 +685,7 @@ func (s *Ssdp) advertiseServer(ads *AdvertisableServer, alive bool) {
     if err == nil {
         s.writeChannel <- writeMessage{msg, to, false}
     } else {
-        log.Println("Error sending advertisement: ", err)
+        s.logger.Warnf("Error sending advertisement: ", err)
     }
 }
 
@@ -674,12 +707,12 @@ func (s *Ssdp) createSocket() error {
     group := net.IPv4(239, 255, 255, 250)
     interfaces, err := net.Interfaces()
     if err != nil {
-        log.Println("net.Interfaces error", err)
+        s.logger.Errorf("net.Interfaces error", err)
         return err
     }
     con, err := net.ListenPacket("udp4", "0.0.0.0:1900")
     if err != nil {
-        log.Println("net.ListenPacket error: ", err)
+        s.logger.Errorf("net.ListenPacket error: ", err)
         return err
     }
     p := ipv4.NewPacketConn(con)
@@ -688,7 +721,7 @@ func (s *Ssdp) createSocket() error {
     for i, v := range interfaces {
         err = p.JoinGroup(&v, &net.UDPAddr{IP: group})
         if err != nil {
-            log.Println("join group ", i, " ", err)
+            s.logger.Warnf("join group ", i, " ", err)
             continue
         }
         didFindInterface = true
@@ -714,7 +747,7 @@ func (s *Ssdp) socketReader() {
     for {
         n, src, err := s.rawSocket.ReadFrom(readBytes)
         if err != nil {
-            log.Println("Error reading from socket: ", err)
+            s.logger.Warnf("Error reading from socket: ", err)
             return
         }
         if n > 0 {
@@ -737,7 +770,7 @@ func (s *Ssdp) socketWriter() {
         }
         _, err := s.rawSocket.WriteTo(msg.message, msg.to)
         if err != nil {
-            log.Println("Error sending message. ", err)
+            s.logger.Warnf("Error sending message. ", err)
         }
     }
 }
