@@ -712,16 +712,19 @@ func (s *Ssdp) createSocket() error {
     }
     con, err := net.ListenPacket("udp4", "0.0.0.0:1900")
     if err != nil {
-        s.logger.Errorf("net.ListenPacket error: ", err)
+        s.logger.Errorf("net.ListenPacket error: %v", err)
         return err
     }
     p := ipv4.NewPacketConn(con)
     p.SetMulticastLoopback(true)
     didFindInterface := false
     for i, v := range interfaces {
+        if v.Flags & net.FlagUp == 0 {
+            continue
+        }
         err = p.JoinGroup(&v, &net.UDPAddr{IP: group})
         if err != nil {
-            s.logger.Warnf("join group ", i, " ", err)
+            s.logger.Warnf("join group %d %v", i, err)
             continue
         }
         didFindInterface = true
