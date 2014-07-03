@@ -719,7 +719,20 @@ func (s *Ssdp) createSocket() error {
     p.SetMulticastLoopback(true)
     didFindInterface := false
     for i, v := range interfaces {
-        if v.Flags & net.FlagUp == 0 {
+        ef, err := v.Addrs()
+        if err != nil {
+            continue
+        }
+        hasRealAddress := false
+        for k := range ef {
+            asIp := net.ParseIP(ef[k].String())
+            if asIp.IsUnspecified() {
+                continue
+            }
+            hasRealAddress = true
+            break
+        }
+        if !hasRealAddress {
             continue
         }
         err = p.JoinGroup(&v, &net.UDPAddr{IP: group})
@@ -754,7 +767,7 @@ func (s *Ssdp) socketReader() {
             return
         }
         if n > 0 {
-            //log.Println("Message: ", string(readBytes[0:n]))
+            //s.logger.Infof("Message: %s", string(readBytes[0:n]))
             s.parseMessage(string(readBytes[0:n]), src.String())
         }
     }
