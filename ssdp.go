@@ -34,7 +34,8 @@ A very simple SSDP implementation.
 Client
 ======
     // create the client, passing in the listener, binding the socket
-    client err := gossdp.NewSsdp(b)
+    // Notice: the client does not listen to broadcasts.. see client doc
+    client err := gossdp.NewSsdpClient(b)
     if err != nil {
         log.Println("Failed to start client: ", err)
         return
@@ -44,8 +45,7 @@ Client
     // run! this will block until stop is called. so open it in a goroutine here
     go c.Start()
 
-    // we saw what we are looking for
-    // and listen for it
+    // send a request for the server type we are listening for.
     err = c.ListenFor("urn:fromkeith:test:web:0")
     if err != nil {
         log.Println("Error ", err)
@@ -343,7 +343,7 @@ func (s *Ssdp) RemoveServer(deviceUuid string) {
 }
 
 
-// Creates a new server/client
+// Creates a new server
 func NewSsdp(l SsdpListener) (*Ssdp, error) {
     return NewSsdpWithLogger(l, DefaultLogger{})
 }
@@ -366,7 +366,13 @@ func NewSsdpWithLogger(l SsdpListener, lg LoggerInterface) (*Ssdp, error) {
 
 func (s *Ssdp) parseMessage(message, hostPort string) {
     if strings.HasPrefix(message, "HTTP") {
-        s.parseResponse(message, hostPort)
+        if s.listener == nil {
+            return
+        }
+        respData := parseResponse(message, hostPort)
+        if respData != nil {
+            s.listener.Response(*respData)
+        }
         return
     }
     req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(message)))
@@ -477,14 +483,10 @@ func (s *Ssdp) msearch(req * http.Request, hostPort string) {
 }
 
 
-func (s *Ssdp) parseResponse(msg, hostPort string) {
-    if s.listener == nil {
-        return
-    }
+func parseResponse(msg, hostPort string) (*ResponseMessage) {
     resp, err := http.ReadResponse(bufio.NewReader(strings.NewReader(msg)), nil)
     if err != nil {
-        s.logger.Warnf("Not a valid response! ", err)
-        return
+        return nil
     }
     defer resp.Body.Close()
 
@@ -509,7 +511,7 @@ func (s *Ssdp) parseResponse(msg, hostPort string) {
         }
     }
 
-    respMessage :=ResponseMessage{
+    respMessage := ResponseMessage{
         MaxAge              : maxAge,
         SearchType          : resp.Header.Get("ST"),
         Usn                 : usn,
@@ -518,8 +520,7 @@ func (s *Ssdp) parseResponse(msg, hostPort string) {
         Server              : resp.Header.Get("SERVER"),
         RawResponse         : resp,
     }
-
-    s.listener.Response(respMessage)
+    return &respMessage
 }
 
 
@@ -555,7 +556,7 @@ func (s *Ssdp) inMSearch(st string, req * http.Request, sendTo string) {
 }
 
 func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
-    msg := s.createSsdpHeader(
+    msg := createSsdpHeader(
         "200 OK",
         map[string]string{
             "ST": ads.ServiceType,
@@ -578,9 +579,7 @@ func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
     s.writeChannel <- writeMessage{msg, addr, false}
 }
 
-// Sends out 1 M-SEARCH request for the specified target.
-// Also filters any NOTIFIES that are sent, so only the ones specified here
-// are reported to the listener.
+// Filters the NOTIFIES to only be returned for the given target.
 func (s *Ssdp) ListenFor(searchTarget string) error {
     s.interactionLock.Lock()
     defer s.interactionLock.Unlock()
@@ -588,32 +587,10 @@ func (s *Ssdp) ListenFor(searchTarget string) error {
         return errors.New("Not running. Can't listen")
     }
 
-
     // listen directly for their search target
     s.listenSearchTargets[searchTarget] = true
 
-    msg := s.createSsdpHeader(
-        "M-SEARCH",
-        map[string]string{
-            "HOST": "239.255.255.250:1900",
-            "ST": searchTarget,
-            "MAN": `"ssdp:discover"`,
-            "MX": "3",
-        },
-        false,
-    )
-
-    addr, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
-    if err != nil {
-        return err
-    }
-    // run in a goroutine, because Start may not have been called yet
-    // and thus s.writeChannel will block!
-    go func() {
-        s.writeChannel <- writeMessage{msg, addr, false}
-    }()
-
-    return err
+    return nil
 }
 
 
@@ -627,7 +604,7 @@ func (s *Ssdp) advertiseTimer(ads *AdvertisableServer, d time.Duration, age int)
 }
 
 
-// Kills the server/client by closing the socket.
+// Kills the server by closing the socket.
 // If any servers are being advertised they will NOTIFY a byebye
 func (s *Ssdp) Stop() {
     s.interactionLock.Lock()
@@ -675,7 +652,7 @@ func (s *Ssdp) advertiseServer(ads *AdvertisableServer, alive bool) {
         heads["CACHE-CONTROL"] = fmt.Sprintf("max-age=%d", ads.MaxAge)
         heads["SERVER"] = serverName
     }
-    msg := s.createSsdpHeader(
+    msg := createSsdpHeader(
             "NOTIFY",
             heads,
             false,
@@ -689,7 +666,7 @@ func (s *Ssdp) advertiseServer(ads *AdvertisableServer, alive bool) {
     }
 }
 
-func (s *Ssdp) createSsdpHeader(head string, vars map[string]string, isResponse bool) []byte {
+func createSsdpHeader(head string, vars map[string]string, isResponse bool) []byte {
     buf := bytes.Buffer{}
     if isResponse {
         buf.WriteString(fmt.Sprintf("HTTP/1.1 %s\r\n", head))
@@ -763,7 +740,7 @@ func (s *Ssdp) socketReader() {
     for {
         n, src, err := s.rawSocket.ReadFrom(readBytes)
         if err != nil {
-            s.logger.Warnf("Error reading from socket: ", err)
+            s.logger.Warnf("Error reading from socket: %v", err)
             return
         }
         if n > 0 {
@@ -786,7 +763,7 @@ func (s *Ssdp) socketWriter() {
         }
         _, err := s.rawSocket.WriteTo(msg.message, msg.to)
         if err != nil {
-            s.logger.Warnf("Error sending message. ", err)
+            s.logger.Warnf("Error sending message. %v", err)
         }
     }
 }
