@@ -101,7 +101,7 @@ import (
     "time"
     "net"
     "fmt"
-    "code.google.com/p/go.net/ipv4"
+    //"code.google.com/p/go.net/ipv4"
     "bytes"
     "errors"
     "strconv"
@@ -109,6 +109,8 @@ import (
     "bufio"
     "runtime"
     "sync"
+    "syscall"
+    "unsafe"
 )
 
 // a small interface to intercept all of my logs
@@ -146,8 +148,9 @@ var (
 type Ssdp struct {
     advertisableServers     map[string][]*AdvertisableServer
     deviceIdToServer        map[string]*AdvertisableServer
-    rawSocket               net.PacketConn
-    socket                  *ipv4.PacketConn
+    //rawSocket               net.PacketConn
+    //socket                  *ipv4.PacketConn
+    socket                  syscall.Handle
     listener                SsdpListener
     listenSearchTargets     map[string]bool
     writeChannel            chan writeMessage
@@ -191,6 +194,8 @@ type AliveMessage struct {
     Server          string
     // The parsed request
     RawRequest      *http.Request
+    // The urn part of the USN
+    Urn             string
 }
 
 // Notify (bye):
@@ -208,6 +213,8 @@ type ByeMessage struct {
     Usn             string
     // The parsed request
     RawRequest      *http.Request
+    // The urn part of the USN
+    Urn             string
 }
 
 // M-Search Response:
@@ -234,6 +241,8 @@ type ResponseMessage struct {
     Server              string
     // The parsed response
     RawResponse         *http.Response
+    // The urn part of the USN
+    Urn             string
 }
 
 // Listener to recieve events.
@@ -395,6 +404,23 @@ func (s *Ssdp) parseCommand(req * http.Request, hostPort string) {
     s.logger.Warnf("Unknown message type!. Message: " + req.Method)
 }
 
+func extractUrnDeviceIdFromUsn(usn string) (deviceId, urn string) {
+    if len(usn) > 0 {
+        parts := strings.Split(usn, ":")
+        if len(parts) > 2 {
+            if parts[0] == "uuid" {
+                deviceId = parts[1]
+                urn = strings.TrimPrefix(usn, "uuid:" + deviceId + ":")
+                if parts[2] == "" {
+                    urn = strings.TrimPrefix(urn, ":")
+                }
+            } else {
+                urn = usn
+            }
+        }
+    }
+    return
+}
 
 func (s *Ssdp) notify(req * http.Request) {
     if s.listener == nil {
@@ -411,16 +437,7 @@ func (s *Ssdp) notify(req * http.Request) {
         return
     }
     usn := req.Header.Get("USN")
-
-    var deviceId string
-    if len(usn) > 0 {
-        parts := strings.Split(usn, ":")
-        if len(parts) > 2 {
-            if parts[0] == "uuid" {
-                deviceId = parts[1]
-            }
-        }
-    }
+    deviceId, urn := extractUrnDeviceIdFromUsn(usn)
 
     nts = strings.ToLower(nts)
     if nts == "ssdp:alive" {
@@ -436,10 +453,17 @@ func (s *Ssdp) notify(req * http.Request) {
                 }
             }
         }
-        message := AliveMessage {
+        // don't notify alive for people we aren't listening to
+        if len(s.listenSearchTargets) > 0 {
+            if _, ok := s.listenSearchTargets[urn]; !ok {
+                return
+            }
+        }
+        message := AliveMessage{
             SearchType      : searchType,
             DeviceId        : deviceId,
             Usn             : usn,
+            Urn             : urn,
             Location        : location,
             MaxAge          : maxAge,
             Server          : server,
@@ -452,6 +476,7 @@ func (s *Ssdp) notify(req * http.Request) {
         message := ByeMessage{
             SearchType      : searchType,
             Usn             : usn,
+            Urn             : urn,
             DeviceId        : deviceId,
             RawRequest      : req,
         }
@@ -498,21 +523,14 @@ func (s *Ssdp) parseResponse(msg, hostPort string) {
             }
         }
     }
-    var deviceId string
     usn := resp.Header.Get("USN")
-    if len(usn) > 0 {
-        parts := strings.Split(usn, ":")
-        if len(parts) > 2 {
-            if parts[0] == "uuid" {
-                deviceId = parts[1]
-            }
-        }
-    }
+    deviceId, urn := extractUrnDeviceIdFromUsn(usn)
 
-    respMessage :=ResponseMessage{
+    respMessage := ResponseMessage{
         MaxAge              : maxAge,
         SearchType          : resp.Header.Get("ST"),
         Usn                 : usn,
+        Urn                 : urn,
         DeviceId            : deviceId,
         Location            : resp.Header.Get("LOCATION"),
         Server              : resp.Header.Get("SERVER"),
@@ -538,6 +556,8 @@ func (s *Ssdp) inMSearch(st string, req * http.Request, sendTo string) {
     // todo: use another routine for the timeout
     // todo: make it random
     time.Sleep(time.Duration(mx) * time.Second)
+
+    s.logger.Warnf("inMSearch: %s - to: %s", st, sendTo)
 
     if st == "ssdp:all" {
         for _, v := range s.advertisableServers {
@@ -569,11 +589,15 @@ func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
         true,
     )
 
+    s.logger.Warnf("Responding to: %s", sendTo)
+
     addr, err := net.ResolveUDPAddr("udp4", sendTo)
     if err != nil {
         s.logger.Errorf("Error resolving UDP addr: ", err)
         return
     }
+    s.interactionLock.Lock()
+    defer s.interactionLock.Unlock()
 
     s.writeChannel <- writeMessage{msg, addr, false}
 }
@@ -603,6 +627,7 @@ func (s *Ssdp) ListenFor(searchTarget string) error {
         false,
     )
 
+    //addr, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
     addr, err := net.ResolveUDPAddr("udp4", "239.255.255.250:1900")
     if err != nil {
         return err
@@ -620,6 +645,8 @@ func (s *Ssdp) ListenFor(searchTarget string) error {
 func (s *Ssdp) advertiseTimer(ads *AdvertisableServer, d time.Duration, age int) *time.Timer {
     var timer *time.Timer
     timer = time.AfterFunc(d, func () {
+        s.interactionLock.Lock()
+        defer s.interactionLock.Unlock()
         s.advertiseServer(ads, true)
         timer.Reset(d + time.Duration(age) * time.Second)
     })
@@ -634,18 +661,19 @@ func (s *Ssdp) Stop() {
     s.isRunning = false
     s.interactionLock.Unlock()
 
-    if s.socket != nil {
+    if s.socket != 0 {
         if len(s.advertisableServers) > 0 {
             s.advertiseClosed()
         }
         s.writeChannel <- writeMessage{nil, nil, true}
         s.exitWriteWaitGroup.Wait()
         close(s.writeChannel)
-        s.socket.Close()
-        s.rawSocket.Close()
+        //s.socket.Close()
+        syscall.Closesocket(s.socket)
+        //s.rawSocket.Close()
         s.exitReadWaitGroup.Wait()
-        s.socket = nil
-        s.rawSocket = nil
+        s.socket = 0
+        //s.rawSocket = nil
     }
     s.logger.Tracef("Stop exiting")
 }
@@ -659,6 +687,10 @@ func (s *Ssdp) advertiseClosed() {
 }
 
 func (s *Ssdp) advertiseServer(ads *AdvertisableServer, alive bool) {
+    if !s.isRunning && alive {
+        return
+    }
+
     ntsString := "ssdp:alive"
     if !alive {
         ntsString = "ssdp:byebye"
@@ -704,7 +736,7 @@ func (s *Ssdp) createSsdpHeader(head string, vars map[string]string, isResponse 
 }
 
 func (s *Ssdp) createSocket() error {
-    group := net.IPv4(239, 255, 255, 250)
+    /*group := net.IPv4(239, 255, 255, 250)
     interfaces, err := net.Interfaces()
     if err != nil {
         s.logger.Errorf("net.Interfaces error", err)
@@ -744,9 +776,27 @@ func (s *Ssdp) createSocket() error {
     }
     if !didFindInterface {
         return errors.New("Unable to find a compatible network interface!")
+    }*/
+
+    /*con, err := net.ListenMulticastUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900})
+    if err != nil {
+        return err
     }
-    s.socket = p
-    s.rawSocket = con
+    */
+    var err error
+    s.socket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
+    if err != nil {
+        panic(err)
+    }
+    syscall.SetsockoptInt(s.socket, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+    syscall.SetsockoptInt(s.socket, syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+    lsa := &syscall.SockaddrInet4{Port: 1900}
+    err = syscall.Bind(s.socket, lsa)
+    if err != nil {
+        panic(err)
+    }
+
+    //s.socket = con
     return nil
 }
 
@@ -756,19 +806,33 @@ func (s *Ssdp) Start() {
     s.socketReader()
 }
 
+
 func (s *Ssdp) socketReader() {
     s.exitReadWaitGroup.Add(1)
     defer s.exitReadWaitGroup.Add(-1)
     readBytes := make([]byte, 2048)
+    bufs := syscall.WSABuf{
+        Len: 2048,
+        Buf: &readBytes[0],
+    }
     for {
-        n, src, err := s.rawSocket.ReadFrom(readBytes)
+        //n, _, src, err := s.socket.ReadFrom(readBytes)
+        var n, flags uint32
+        var asIp4 syscall.RawSockaddrInet4
+        fromAny := (*syscall.RawSockaddrAny) (unsafe.Pointer(&asIp4))
+        fromSize := int32(unsafe.Sizeof(asIp4))
+        err := syscall.WSARecvFrom(s.socket, &bufs, 1, &n, &flags, fromAny, &fromSize, nil, nil)
         if err != nil {
             s.logger.Warnf("Error reading from socket: ", err)
             return
         }
+        s.logger.Infof("Got something...")
         if n > 0 {
+            //asIp4 := (*syscall.RawSockaddrInet4) (unsafe.Pointer(&from))
+            src := fmt.Sprintf("%d.%d.%d.%d:%d", asIp4.Addr[0], asIp4.Addr[1], asIp4.Addr[2], asIp4.Addr[3], asIp4.Port)
             //s.logger.Infof("Message: %s", string(readBytes[0:n]))
-            s.parseMessage(string(readBytes[0:n]), src.String())
+            //s.parseMessage(string(readBytes[0:n]), src.String())
+            s.parseMessage(string(readBytes[0:n]), src)
         }
     }
 }
@@ -784,7 +848,19 @@ func (s *Ssdp) socketWriter() {
         if msg.shouldExit {
             return
         }
-        _, err := s.rawSocket.WriteTo(msg.message, msg.to)
+        bufs := syscall.WSABuf{
+            Len: uint32(len(msg.message)),
+            Buf: &msg.message[0],
+        }
+        as4 := msg.to.IP.To4()
+        to := &syscall.SockaddrInet4{
+            Port: msg.to.Port,
+            Addr: [4]byte{as4[0], as4[1], as4[2], as4[3]},
+        }
+        fmt.Printf("to %#v\n", to)
+        msgLen := uint32(len(msg.message))
+        err := syscall.WSASendto(s.socket, &bufs, 1, &msgLen, 0, to, nil, nil)
+        //_, err := s.socket.WriteTo(msg.message, nil, msg.to)
         if err != nil {
             s.logger.Warnf("Error sending message. ", err)
         }
