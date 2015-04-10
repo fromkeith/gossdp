@@ -576,6 +576,12 @@ func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
         return
     }
 
+    s.interactionLock.Lock()
+    defer s.interactionLock.Unlock()
+    if !s.isRunning  {
+        return
+    }
+
     s.writeChannel <- writeMessage{msg, addr, false}
 }
 
@@ -636,6 +642,13 @@ func (s *Ssdp) advertiseClosed() {
 }
 
 func (s *Ssdp) advertiseServer(ads *AdvertisableServer, alive bool) {
+    s.interactionLock.Lock()
+    defer s.interactionLock.Unlock()
+
+    if !s.isRunning  {
+        return
+    }
+
     ntsString := "ssdp:alive"
     if !alive {
         ntsString = "ssdp:byebye"
