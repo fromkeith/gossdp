@@ -4,7 +4,6 @@ import (
     "net"
     "sync"
     "strings"
-    "errors"
 )
 
 
@@ -109,9 +108,6 @@ func (c *ClientSsdp) socketWriter() {
         if !more {
             return
         }
-        if msg.shouldExit {
-            return
-        }
         _, err := c.socket.WriteTo(msg.message, msg.to)
         if err != nil {
             c.logger.Warnf("Error sending message. %v", err)
@@ -127,9 +123,8 @@ func (c *ClientSsdp) Stop() {
     c.interactionLock.Unlock()
 
     if c.socket != nil {
-        c.writeChannel <- writeMessage{nil, nil, true}
-        c.exitWriteWaitGroup.Wait()
         close(c.writeChannel)
+        c.exitWriteWaitGroup.Wait()
         c.socket.Close()
         c.exitReadWaitGroup.Wait()
         c.socket = nil
@@ -140,12 +135,6 @@ func (c *ClientSsdp) Stop() {
 
 // Sends out 1 M-SEARCH request for the specified target.
 func (c *ClientSsdp) ListenFor(searchTarget string) error {
-    c.interactionLock.Lock()
-    defer c.interactionLock.Unlock()
-    if !c.isRunning {
-        return errors.New("Not running. Can't listen")
-    }
-
     msg := createSsdpHeader(
         "M-SEARCH",
         map[string]string{
@@ -164,6 +153,11 @@ func (c *ClientSsdp) ListenFor(searchTarget string) error {
     // run in a goroutine, because Start may not have been called yet
     // and thus s.writeChannel will block!
     go func() {
+        c.interactionLock.Lock()
+        defer c.interactionLock.Unlock()
+        if !c.isRunning {
+            return
+        }
         c.writeChannel <- writeMessage{msg, addr, false}
     }()
 
