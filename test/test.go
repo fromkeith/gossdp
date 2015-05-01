@@ -12,13 +12,13 @@ type blah struct {
 }
 
 func (b blah) NotifyAlive(message gossdp.AliveMessage) {
-    log.Println("NotifyAlive")
+    log.Printf("NotifyAlive %#v\n", message)
 }
 func (b blah) NotifyBye(message gossdp.ByeMessage) {
-    log.Println("NotifyBye")
+    log.Printf("NotifyBye %#v\n", message)
 }
 func (b blah) Response(message gossdp.ResponseMessage) {
-    log.Println("Response")
+    log.Printf("Response %#v\n", message)
 }
 
 func testServer() {
@@ -42,7 +42,7 @@ func testServer() {
 
 func testClient() {
     b := blah{}
-    c, err := gossdp.NewSsdp(b)
+    c, err := gossdp.NewSsdpClient(b)
     if err != nil {
         log.Println("Failed to start client: ", err)
         return
