@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2013, fromkeith
+ * Copyright (c) 2013-2015, fromkeith
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without modification,
@@ -90,7 +90,6 @@ USN:
         defined by vendor. Periods in domainname should be replaced with '-'
 
 
-
 */
 package gossdp
 
@@ -101,7 +100,6 @@ import (
     "time"
     "net"
     "fmt"
-    //"code.google.com/p/go.net/ipv4"
     "bytes"
     "errors"
     "strconv"
@@ -109,9 +107,8 @@ import (
     "bufio"
     "runtime"
     "sync"
-    "syscall"
-    "unsafe"
 )
+
 
 // a small interface to intercept all of my logs
 type LoggerInterface interface {
@@ -148,9 +145,7 @@ var (
 type Ssdp struct {
     advertisableServers     map[string][]*AdvertisableServer
     deviceIdToServer        map[string]*AdvertisableServer
-    //rawSocket               net.PacketConn
-    //socket                  *ipv4.PacketConn
-    socket                  syscall.Handle
+    socket                  theSocket
     listener                SsdpListener
     listenSearchTargets     map[string]bool
     writeChannel            chan writeMessage
@@ -546,36 +541,38 @@ func (s *Ssdp) inMSearch(st string, req * http.Request, sendTo string) {
     if st[0] == '"' && st[len(st) - 1] == '"' {
         st = st[1:len(st) - 2]
     }
-    mx := 0
+    mx := 1
     if mxStr := req.Header.Get("MX"); mxStr != "" {
         mxInt64, err := strconv.ParseInt(mxStr, 10, 0)
         if err != nil {
             mx = int(mxInt64)
         }
+        if mx < 1 {
+            mx = 1
+        } else if mx > 5 {
+            mx = 5
+        }
     }
-
-    // todo: use another routine for the timeout
-    // todo: make it random
-    time.Sleep(time.Duration(mx) * time.Second)
-
-    s.logger.Warnf("inMSearch: %s - to: %s", st, sendTo)
 
     if st == "ssdp:all" {
         for _, v := range s.advertisableServers {
             for _, d := range v {
-                s.respondToMSearch(d, sendTo)
+                s.respondToMSearch(d, sendTo, mx)
             }
         }
     } else if d, ok := s.deviceIdToServer[st]; ok {
-        s.respondToMSearch(d, sendTo)
+        s.respondToMSearch(d, sendTo, mx)
     } else if v, ok := s.advertisableServers[st]; ok {
         for _, d := range v {
-            s.respondToMSearch(d, sendTo)
+            s.respondToMSearch(d, sendTo, mx)
         }
     }
 }
 
-func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
+func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string, mx int) {
+    time.Sleep(time.Duration(mx) * time.Second)
+
+
     msg := createSsdpHeader(
         "200 OK",
         map[string]string{
@@ -590,15 +587,11 @@ func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string) {
         true,
     )
 
-    s.logger.Warnf("Responding to: %s", sendTo)
-
     addr, err := net.ResolveUDPAddr("udp4", sendTo)
     if err != nil {
         s.logger.Errorf("Error resolving UDP addr: ", err)
         return
     }
-    s.interactionLock.Lock()
-    defer s.interactionLock.Unlock()
 
     s.interactionLock.Lock()
     defer s.interactionLock.Unlock()
@@ -627,8 +620,6 @@ func (s *Ssdp) ListenFor(searchTarget string) error {
 func (s *Ssdp) advertiseTimer(ads *AdvertisableServer, d time.Duration, age int) *time.Timer {
     var timer *time.Timer
     timer = time.AfterFunc(d, func () {
-        s.interactionLock.Lock()
-        defer s.interactionLock.Unlock()
         s.advertiseServer(ads, true)
         timer.Reset(d + time.Duration(age) * time.Second)
     })
@@ -643,7 +634,7 @@ func (s *Ssdp) Stop() {
     s.isRunning = false
     s.interactionLock.Unlock()
 
-    if s.socket != 0 {
+    if s.socket.IsValid() {
         if len(s.advertisableServers) > 0 {
             s.advertiseClosed()
         }
@@ -651,10 +642,9 @@ func (s *Ssdp) Stop() {
         s.exitWriteWaitGroup.Wait()
         close(s.writeChannel)
         //s.socket.Close()
-        syscall.Closesocket(s.socket)
+        s.closeSocket()
         //s.rawSocket.Close()
         s.exitReadWaitGroup.Wait()
-        s.socket = 0
         //s.rawSocket = nil
     }
     s.logger.Tracef("Stop exiting")
@@ -720,71 +710,6 @@ func createSsdpHeader(head string, vars map[string]string, isResponse bool) []by
     return []byte(buf.String())
 }
 
-func (s *Ssdp) createSocket() error {
-    /*group := net.IPv4(239, 255, 255, 250)
-    interfaces, err := net.Interfaces()
-    if err != nil {
-        s.logger.Errorf("net.Interfaces error", err)
-        return err
-    }
-    con, err := net.ListenPacket("udp4", "0.0.0.0:1900")
-    if err != nil {
-        s.logger.Errorf("net.ListenPacket error: %v", err)
-        return err
-    }
-    p := ipv4.NewPacketConn(con)
-    p.SetMulticastLoopback(true)
-    didFindInterface := false
-    for i, v := range interfaces {
-        ef, err := v.Addrs()
-        if err != nil {
-            continue
-        }
-        hasRealAddress := false
-        for k := range ef {
-            asIp := net.ParseIP(ef[k].String())
-            if asIp.IsUnspecified() {
-                continue
-            }
-            hasRealAddress = true
-            break
-        }
-        if !hasRealAddress {
-            continue
-        }
-        err = p.JoinGroup(&v, &net.UDPAddr{IP: group})
-        if err != nil {
-            s.logger.Warnf("join group %d %v", i, err)
-            continue
-        }
-        didFindInterface = true
-    }
-    if !didFindInterface {
-        return errors.New("Unable to find a compatible network interface!")
-    }*/
-
-    /*con, err := net.ListenMulticastUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(239, 255, 255, 250), Port: 1900})
-    if err != nil {
-        return err
-    }
-    */
-    var err error
-    s.socket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, 0)
-    if err != nil {
-        panic(err)
-    }
-    syscall.SetsockoptInt(s.socket, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-    syscall.SetsockoptInt(s.socket, syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
-    lsa := &syscall.SockaddrInet4{Port: 1900}
-    err = syscall.Bind(s.socket, lsa)
-    if err != nil {
-        panic(err)
-    }
-
-    //s.socket = con
-    return nil
-}
-
 // Starts listening to packets on the network.
 func (s *Ssdp) Start() {
     go s.socketWriter()
@@ -795,29 +720,15 @@ func (s *Ssdp) Start() {
 func (s *Ssdp) socketReader() {
     s.exitReadWaitGroup.Add(1)
     defer s.exitReadWaitGroup.Add(-1)
-    readBytes := make([]byte, 2048)
-    bufs := syscall.WSABuf{
-        Len: 2048,
-        Buf: &readBytes[0],
-    }
+
     for {
-        //n, _, src, err := s.socket.ReadFrom(readBytes)
-        var n, flags uint32
-        var asIp4 syscall.RawSockaddrInet4
-        fromAny := (*syscall.RawSockaddrAny) (unsafe.Pointer(&asIp4))
-        fromSize := int32(unsafe.Sizeof(asIp4))
-        err := syscall.WSARecvFrom(s.socket, &bufs, 1, &n, &flags, fromAny, &fromSize, nil, nil)
+        msg, src, err := s.read()
         if err != nil {
             s.logger.Warnf("Error reading from socket: %v", err)
             return
         }
-        s.logger.Infof("Got something...")
-        if n > 0 {
-            //asIp4 := (*syscall.RawSockaddrInet4) (unsafe.Pointer(&from))
-            src := fmt.Sprintf("%d.%d.%d.%d:%d", asIp4.Addr[0], asIp4.Addr[1], asIp4.Addr[2], asIp4.Addr[3], asIp4.Port)
-            //s.logger.Infof("Message: %s", string(readBytes[0:n]))
-            //s.parseMessage(string(readBytes[0:n]), src.String())
-            s.parseMessage(string(readBytes[0:n]), src)
+        if len(msg) > 0 {
+            s.parseMessage(string(msg), src)
         }
     }
 }
@@ -833,20 +744,7 @@ func (s *Ssdp) socketWriter() {
         if msg.shouldExit {
             return
         }
-        bufs := syscall.WSABuf{
-            Len: uint32(len(msg.message)),
-            Buf: &msg.message[0],
-        }
-        as4 := msg.to.IP.To4()
-        to := &syscall.SockaddrInet4{
-            Port: msg.to.Port,
-            Addr: [4]byte{as4[0], as4[1], as4[2], as4[3]},
-        }
-        fmt.Printf("to %#v\n", to)
-        msgLen := uint32(len(msg.message))
-        err := syscall.WSASendto(s.socket, &bufs, 1, &msgLen, 0, to, nil, nil)
-        //_, err := s.socket.WriteTo(msg.message, nil, msg.to)
-        if err != nil {
+        if err := s.write(msg); err != nil {
             s.logger.Warnf("Error sending message. %v", err)
         }
     }

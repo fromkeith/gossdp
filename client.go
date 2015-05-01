@@ -54,7 +54,6 @@ func NewSsdpClientWithLogger(l ClientListener, lg LoggerInterface) (*ClientSsdp,
 }
 
 func (c *ClientSsdp) createSocket() error {
-    var err error
     addr, err := net.ResolveUDPAddr("udp4", "0.0.0.0:0")
     if err != nil {
         return err
