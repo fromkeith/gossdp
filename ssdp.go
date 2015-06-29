@@ -724,11 +724,13 @@ func (s *Ssdp) socketReader() {
     for {
         msg, src, err := s.read()
         if err != nil {
-            s.logger.Warnf("Error reading from socket: %v", err)
+            s.logger.Warnf("Error reading from SSDP socket: %v", err)
             return
         }
         if len(msg) > 0 {
+            //s.logger.Warnf("Received: %s", string(msg))
             s.parseMessage(string(msg), src)
+            //s.logger.Warnf("Done parsing")
         }
     }
 }

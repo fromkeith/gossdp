@@ -36,6 +36,7 @@ import (
     "fmt"
     "syscall"
     "unsafe"
+    "net"
 )
 
 
@@ -75,12 +76,41 @@ func (s *Ssdp) createSocket() error {
         s.socket.socket = 0
         return err
     }
-    // join the multicast group
-    mreq := &syscall.IPMreq{Multiaddr: [4]byte{239, 255, 255, 250}, Interface: [4]byte{0, 0, 0, 0}}
-    if err := syscall.SetsockoptIPMreq(s.socket.socket, syscall.IPPROTO_IP, syscall.IP_ADD_MEMBERSHIP, mreq); err != nil {
+    iter, err := net.Interfaces()
+    if err != nil {
         syscall.Closesocket(s.socket.socket)
         s.socket.socket = 0
         return err
+    }
+    wasFound := false
+    for i := range iter {
+        if iter[i].Flags & net.FlagMulticast == 0 {
+            continue
+        }
+        addrs, err := iter[i].Addrs()
+        if err != nil {
+            continue
+        }
+        for k := range addrs {
+            as4 := addrs[k].(*net.IPAddr).IP.To4()
+            // join the multicast group
+            mreq := &syscall.IPMreq{Multiaddr: [4]byte{239, 255, 255, 250}, Interface: [4]byte{as4[0], as4[1], as4[2], as4[3]}}
+            if err := syscall.SetsockoptIPMreq(s.socket.socket, syscall.IPPROTO_IP, syscall.IP_ADD_MEMBERSHIP, mreq); err != nil {
+                syscall.Closesocket(s.socket.socket)
+                s.socket.socket = 0
+                return err
+            }
+            wasFound = true
+        }
+    }
+    // if we couldn't join a group, fall back to just 0.0.0.0
+    if !wasFound {
+        mreq := &syscall.IPMreq{Multiaddr: [4]byte{239, 255, 255, 250}, Interface: [4]byte{0, 0, 0, 0}}
+        if err := syscall.SetsockoptIPMreq(s.socket.socket, syscall.IPPROTO_IP, syscall.IP_ADD_MEMBERSHIP, mreq); err != nil {
+            syscall.Closesocket(s.socket.socket)
+            s.socket.socket = 0
+            return err
+        }
     }
 
     s.socket.readBytes = make([]byte, 2048)
