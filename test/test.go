@@ -55,8 +55,12 @@ func testClient() {
 }
 
 func main() {
-    testServer()
-    //go testServer()
-    //time.Sleep(5 * time.Second)
-    //testClient()
+    //testServer()
+    go testServer()
+    time.Sleep(5 * time.Second)
+    testClient()
+    // should print out something like:
+    /*
+    2017/08/25 13:53:08 Response gossdp.ResponseMessage{MaxAge:3600, SearchType:"urn:fromkeith:test:web:1", DeviceId:"hh0c2981-0029-44b7-4u04-27f187aecf78", Usn:"uuid:hh0c2981-0029-44b7-4u04-27f187aecf78::urn:fromkeith:test:web:1", Location:"http://192.168.1.1:8080", Server:"windows/0.0 UPnP/1.0 gossdp/0.1", RawResponse:(*http.Response)(0xc04215e000), Urn:"urn:fromkeith:test:web:1"}
+    */
 }
