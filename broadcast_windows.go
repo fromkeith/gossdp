@@ -30,140 +30,134 @@
 
 package gossdp
 
-
 import (
-    "encoding/binary"
-    "fmt"
-    "syscall"
-    "unsafe"
-    "net"
+	"encoding/binary"
+	"fmt"
+	"net"
+	"syscall"
+	"unsafe"
 )
 
-
 type theSocket struct {
-    socket                  syscall.Handle
-    readBytes               []byte
+	socket    syscall.Handle
+	readBytes []byte
 }
 
 func (ts theSocket) IsValid() bool {
-    return ts.socket != 0
+	return ts.socket != 0
 }
 
 func (s *Ssdp) createSocket() error {
-    // create the socket
-    var err error
-    s.socket.socket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
-    if err != nil {
-        return err
-    }
-    // make sure we can reuse it / share it
-    if err := syscall.SetsockoptInt(s.socket.socket, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil{
-        syscall.Closesocket(s.socket.socket)
-        s.socket.socket = 0
-        return err
-    }
-    // going to broadcast
-    if err := syscall.SetsockoptInt(s.socket.socket, syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1); err != nil{
-        syscall.Closesocket(s.socket.socket)
-        s.socket.socket = 0
-        return err
-    }
-    // bind it to the ssdp port
-    lsa := &syscall.SockaddrInet4{Port: 1900, Addr: [4]byte{0, 0, 0, 0}}
-    err = syscall.Bind(s.socket.socket, lsa)
-    if err != nil {
-        syscall.Closesocket(s.socket.socket)
-        s.socket.socket = 0
-        return err
-    }
-    iter, err := net.Interfaces()
-    if err != nil {
-        syscall.Closesocket(s.socket.socket)
-        s.socket.socket = 0
-        return err
-    }
-    wasFound := false
-    for i := range iter {
-        if iter[i].Flags & net.FlagMulticast == 0 {
-            continue
-        }
-        addrs, err := iter[i].Addrs()
-        if err != nil {
-            continue
-        }
-        for k := range addrs {
-            as4 := addrs[k].(*net.IPAddr).IP.To4()
-            // join the multicast group
-            mreq := &syscall.IPMreq{Multiaddr: [4]byte{239, 255, 255, 250}, Interface: [4]byte{as4[0], as4[1], as4[2], as4[3]}}
-            if err := syscall.SetsockoptIPMreq(s.socket.socket, syscall.IPPROTO_IP, syscall.IP_ADD_MEMBERSHIP, mreq); err != nil {
-                syscall.Closesocket(s.socket.socket)
-                s.socket.socket = 0
-                return err
-            }
-            wasFound = true
-        }
-    }
-    // if we couldn't join a group, fall back to just 0.0.0.0
-    if !wasFound {
-        mreq := &syscall.IPMreq{Multiaddr: [4]byte{239, 255, 255, 250}, Interface: [4]byte{0, 0, 0, 0}}
-        if err := syscall.SetsockoptIPMreq(s.socket.socket, syscall.IPPROTO_IP, syscall.IP_ADD_MEMBERSHIP, mreq); err != nil {
-            syscall.Closesocket(s.socket.socket)
-            s.socket.socket = 0
-            return err
-        }
-    }
+	// create the socket
+	var err error
+	s.socket.socket, err = syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM, syscall.IPPROTO_UDP)
+	if err != nil {
+		return err
+	}
+	// make sure we can reuse it / share it
+	if err := syscall.SetsockoptInt(s.socket.socket, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+		syscall.Closesocket(s.socket.socket)
+		s.socket.socket = 0
+		return err
+	}
+	// going to broadcast
+	if err := syscall.SetsockoptInt(s.socket.socket, syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1); err != nil {
+		syscall.Closesocket(s.socket.socket)
+		s.socket.socket = 0
+		return err
+	}
+	// bind it to the ssdp port
+	lsa := &syscall.SockaddrInet4{Port: 1900, Addr: [4]byte{0, 0, 0, 0}}
+	err = syscall.Bind(s.socket.socket, lsa)
+	if err != nil {
+		syscall.Closesocket(s.socket.socket)
+		s.socket.socket = 0
+		return err
+	}
+	iter, err := net.Interfaces()
+	if err != nil {
+		syscall.Closesocket(s.socket.socket)
+		s.socket.socket = 0
+		return err
+	}
+	wasFound := false
+	for i := range iter {
+		if iter[i].Flags&net.FlagMulticast == 0 {
+			continue
+		}
+		addrs, err := iter[i].Addrs()
+		if err != nil {
+			continue
+		}
+		for k := range addrs {
+			as4 := addrs[k].(*net.IPAddr).IP.To4()
+			// join the multicast group
+			mreq := &syscall.IPMreq{Multiaddr: [4]byte{239, 255, 255, 250}, Interface: [4]byte{as4[0], as4[1], as4[2], as4[3]}}
+			if err := syscall.SetsockoptIPMreq(s.socket.socket, syscall.IPPROTO_IP, syscall.IP_ADD_MEMBERSHIP, mreq); err != nil {
+				syscall.Closesocket(s.socket.socket)
+				s.socket.socket = 0
+				return err
+			}
+			wasFound = true
+		}
+	}
+	// if we couldn't join a group, fall back to just 0.0.0.0
+	if !wasFound {
+		mreq := &syscall.IPMreq{Multiaddr: [4]byte{239, 255, 255, 250}, Interface: [4]byte{0, 0, 0, 0}}
+		if err := syscall.SetsockoptIPMreq(s.socket.socket, syscall.IPPROTO_IP, syscall.IP_ADD_MEMBERSHIP, mreq); err != nil {
+			syscall.Closesocket(s.socket.socket)
+			s.socket.socket = 0
+			return err
+		}
+	}
 
-    s.socket.readBytes = make([]byte, 2048)
+	s.socket.readBytes = make([]byte, 2048)
 
-    return nil
+	return nil
 }
-
 
 func (s *Ssdp) closeSocket() {
-    syscall.Closesocket(s.socket.socket)
-    s.socket.socket = 0
+	syscall.Closesocket(s.socket.socket)
+	s.socket.socket = 0
 }
-
 
 func (s *Ssdp) read() ([]byte, string, error) {
-    bufs := syscall.WSABuf{
-        Len: 2048,
-        Buf: &s.socket.readBytes[0],
-    }
-    var n, flags uint32
-    var asIp4 syscall.RawSockaddrInet4
-    fromAny := (*syscall.RawSockaddrAny) (unsafe.Pointer(&asIp4))
-    fromSize := int32(unsafe.Sizeof(asIp4))
-    err := syscall.WSARecvFrom(s.socket.socket, &bufs, 1, &n, &flags, fromAny, &fromSize, nil, nil)
-    if err != nil {
-        return nil, "", err
-    }
-    if n > 0 {
-        // need to convert the port bytes ordering
-        portBytes := make([]byte, 6)
-        binary.BigEndian.PutUint16(portBytes, asIp4.Port)
-        port := binary.LittleEndian.Uint16(portBytes)
-        // set the address
-        src := fmt.Sprintf("%d.%d.%d.%d:%d", asIp4.Addr[0], asIp4.Addr[1], asIp4.Addr[2], asIp4.Addr[3], port)
-        //s.logger.Infof("Message: %s", string(readBytes[0:n]))
-        return s.socket.readBytes[0:n], src, nil
-    }
-    return nil, "", nil
+	bufs := syscall.WSABuf{
+		Len: 2048,
+		Buf: &s.socket.readBytes[0],
+	}
+	var n, flags uint32
+	var asIp4 syscall.RawSockaddrInet4
+	fromAny := (*syscall.RawSockaddrAny)(unsafe.Pointer(&asIp4))
+	fromSize := int32(unsafe.Sizeof(asIp4))
+	err := syscall.WSARecvFrom(s.socket.socket, &bufs, 1, &n, &flags, fromAny, &fromSize, nil, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	if n > 0 {
+		// need to convert the port bytes ordering
+		portBytes := make([]byte, 6)
+		binary.BigEndian.PutUint16(portBytes, asIp4.Port)
+		port := binary.LittleEndian.Uint16(portBytes)
+		// set the address
+		src := fmt.Sprintf("%d.%d.%d.%d:%d", asIp4.Addr[0], asIp4.Addr[1], asIp4.Addr[2], asIp4.Addr[3], port)
+		//s.logger.Infof("Message: %s", string(readBytes[0:n]))
+		return s.socket.readBytes[0:n], src, nil
+	}
+	return nil, "", nil
 }
 
-
-
 func (s *Ssdp) write(msg writeMessage) error {
-    bufs := syscall.WSABuf{
-        Len: uint32(len(msg.message)),
-        Buf: &msg.message[0],
-    }
-    as4 := msg.to.IP.To4()
-    to := &syscall.SockaddrInet4{
-        Port: msg.to.Port,
-        Addr: [4]byte{as4[0], as4[1], as4[2], as4[3]},
-    }
-    msgLen := uint32(len(msg.message))
-    err := syscall.WSASendto(s.socket.socket, &bufs, 1, &msgLen, 0, to, nil, nil)
-    return err
+	bufs := syscall.WSABuf{
+		Len: uint32(len(msg.message)),
+		Buf: &msg.message[0],
+	}
+	as4 := msg.to.IP.To4()
+	to := &syscall.SockaddrInet4{
+		Port: msg.to.Port,
+		Addr: [4]byte{as4[0], as4[1], as4[2], as4[3]},
+	}
+	msgLen := uint32(len(msg.message))
+	err := syscall.WSASendto(s.socket.socket, &bufs, 1, &msgLen, 0, to, nil, nil)
+	return err
 }
