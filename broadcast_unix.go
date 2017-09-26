@@ -52,7 +52,7 @@ func (s *Ssdp) createSocket() error {
 	group := net.IPv4(239, 255, 255, 250)
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		s.logger.Errorf("net.Interfaces error", err)
+		s.logger.Errorf("net.Interfaces error %v", err)
 		return err
 	}
 	con, err := net.ListenPacket("udp4", "0.0.0.0:1900")
