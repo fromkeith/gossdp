@@ -99,6 +99,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"regexp"
@@ -529,36 +530,42 @@ func (s *Ssdp) inMSearch(st string, req *http.Request, sendTo string) {
 	if st[0] == '"' && st[len(st)-1] == '"' {
 		st = st[1 : len(st)-2]
 	}
-	mx := 1
+	mx := time.Second
 	if mxStr := req.Header.Get("MX"); mxStr != "" {
 		mxInt64, err := strconv.ParseInt(mxStr, 10, 0)
 		if err != nil {
-			mx = int(mxInt64)
+			s.logger.Warnf("Could not parse MX header: %s", err)
+			mxInt64 = 1
 		}
-		if mx < 1 {
-			mx = 1
-		} else if mx > 5 {
-			mx = 5
+		mx = time.Duration(mxInt64) * time.Second
+		if mx < time.Second {
+			mx = time.Second
+		} else if mx > 60*time.Second {
+			mx = 60 * time.Second
 		}
 	}
 
 	if st == "ssdp:all" {
+		totalServers := 0
+		for _, v := range s.advertisableServers {
+			totalServers += len(v)
+		}
 		for _, v := range s.advertisableServers {
 			for _, d := range v {
-				s.respondToMSearch(d, sendTo, mx)
+				s.respondToMSearch(d, sendTo, mx/time.Duration(totalServers))
 			}
 		}
 	} else if d, ok := s.deviceIdToServer[st]; ok {
 		s.respondToMSearch(d, sendTo, mx)
 	} else if v, ok := s.advertisableServers[st]; ok {
 		for _, d := range v {
-			s.respondToMSearch(d, sendTo, mx)
+			s.respondToMSearch(d, sendTo, mx/time.Duration(len(v)))
 		}
 	}
 }
 
-func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string, mx int) {
-	time.Sleep(time.Duration(mx) * time.Second)
+func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string, mx time.Duration) {
+	time.Sleep(time.Duration(rand.Int63n(int64(mx) + 1)))
 
 	msg := createSsdpHeader(
 		"200 OK",
