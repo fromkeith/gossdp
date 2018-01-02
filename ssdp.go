@@ -535,13 +535,13 @@ func (s *Ssdp) inMSearch(st string, req *http.Request, sendTo string) {
 		mxInt64, err := strconv.ParseInt(mxStr, 10, 0)
 		if err != nil {
 			s.logger.Warnf("Could not parse MX header: %s", err)
-		} else {
-			mx = time.Duration(mxInt64) * time.Second
-			if mx < time.Second {
-				mx = time.Second
-			} else if mx > 60*time.Second {
-				mx = 60 * time.Second
-			}
+			mxInt64 = 1
+		}
+		mx = time.Duration(mxInt64) * time.Second
+		if mx < time.Second {
+			mx = time.Second
+		} else if mx > 60*time.Second {
+			mx = 60 * time.Second
 		}
 	}
 
