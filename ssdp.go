@@ -534,14 +534,14 @@ func (s *Ssdp) inMSearch(st string, req *http.Request, sendTo string) {
 	if mxStr := req.Header.Get("MX"); mxStr != "" {
 		mxInt64, err := strconv.ParseInt(mxStr, 10, 0)
 		if err != nil {
-			s.logger.Warnf("Could not parse mxStr: %s", err)
-			return
-		}
-		mx = time.Duration(mxInt64) * time.Second
-		if mx < time.Second {
-			mx = time.Second
-		} else if mx > 60*time.Second {
-			mx = 60 * time.Second
+			s.logger.Warnf("Could not parse MX header: %s", err)
+		} else {
+			mx = time.Duration(mxInt64) * time.Second
+			if mx < time.Second {
+				mx = time.Second
+			} else if mx > 60*time.Second {
+				mx = 60 * time.Second
+			}
 		}
 	}
 
@@ -565,7 +565,7 @@ func (s *Ssdp) inMSearch(st string, req *http.Request, sendTo string) {
 }
 
 func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string, mx time.Duration) {
-	time.Sleep(time.Duration(rand.Int63n(int64(mx))))
+	time.Sleep(time.Duration(rand.Int63n(int64(mx) + 1)))
 
 	msg := createSsdpHeader(
 		"200 OK",
