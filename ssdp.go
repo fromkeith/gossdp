@@ -583,7 +583,7 @@ func (s *Ssdp) respondToMSearch(ads *AdvertisableServer, sendTo string, mx time.
 
 	addr, err := net.ResolveUDPAddr("udp4", sendTo)
 	if err != nil {
-		s.logger.Errorf("Error resolving UDP addr: ", err)
+		s.logger.Errorf("Error resolving UDP addr: %v", err)
 		return
 	}
 
